@@ -1,0 +1,14 @@
+services:
+  backend:
+    command:
+      ["sh", "-c", "pnpm --filter @folio/backend db:migrate && pnpm --filter @folio/backend dev"]
+    environment:
+      NODE_ENV: development
+    volumes:
+      - ./backend/src:/app/backend/src
+  frontend:
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./frontend/src:/app/frontend/src
+      - ./frontend/index.html:/app/frontend/index.html

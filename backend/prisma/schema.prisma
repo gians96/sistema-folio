@@ -1,0 +1,22 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "mysql"
+  url = env("DATABASE_URL")
+}
+model Job {
+  id String @id @db.VarChar(36)
+  tokenHash String @db.Char(64)
+  name String @db.VarChar(255)
+  kind String @db.VarChar(8)
+  status String @db.VarChar(24)
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  pages Json
+  config Json?
+  revision Int @default(0)
+  renderedRevision Int?
+  error String? @db.Text
+  @@index([expiresAt])
+}

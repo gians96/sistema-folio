@@ -1,0 +1,26 @@
+{
+  "name": "sistema-folio",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "pnpm@11.1.2",
+  "engines": { "node": ">=24", "pnpm": "11.1.2" },
+  "scripts": {
+    "dev": "pnpm local:check && pnpm db:generate && pnpm --filter @folio/backend db:migrate && pnpm --filter @folio/shared build && pnpm --parallel --filter @folio/backend --filter @folio/frontend dev",
+    "local:check": "node scripts/check-local.mjs",
+    "local:setup": "node scripts/setup-local-mysql.mjs && pnpm db:generate && pnpm --filter @folio/backend db:migrate",
+    "dev:frontend": "pnpm --filter @folio/frontend dev",
+    "build": "pnpm --filter @folio/shared build && pnpm --filter @folio/backend build && pnpm --filter @folio/frontend build",
+    "test": "pnpm --filter @folio/backend test",
+    "test:e2e": "playwright test",
+    "test:local": "node scripts/local-smoke.mjs",
+    "db:generate": "pnpm --filter @folio/backend db:generate"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "typescript": "~5.9.3",
+    "prisma": "6.19.3",
+    "deepmerge-ts": "8.0.2",
+    "vite": "7.3.6",
+    "pdf-lib": "^1.17.1"
+  }
+}
