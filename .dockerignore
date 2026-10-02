@@ -8,3 +8,11 @@ data
 tmp
 test-results
 playwright-report
+.github
+README.md
+compose.yaml
+compose.dev.yaml
+compose.prod.yaml
+backend/test
+tests
+scripts

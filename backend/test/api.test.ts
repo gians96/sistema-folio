@@ -4,6 +4,7 @@ import { mkdtemp, rm, access } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { PDFDocument } from "pdf-lib";
+import { scryptSync } from "node:crypto";
 import { createApp, type Settings } from "../src/app.js";
 import { MemoryStore } from "./support.js";
 
@@ -36,6 +37,64 @@ const parseBinary = (
   res.on("end", () => callback(null, Buffer.concat(chunks)));
 };
 describe("API de trabajos", () => {
+  it("exige login privado, mantiene el token del trabajo y cierra sesión", async () => {
+    const salt = Buffer.alloc(16, 7);
+    const digest = scryptSync("una-contraseña-segura", salt, 64);
+    const service = createApp(new MemoryStore(), {
+      ...settings,
+      auth: {
+        username: "admin",
+        passwordHash: `scrypt:${salt.toString("hex")}:${digest.toString("hex")}`,
+        sessionSecret: "un-secreto-de-sesion-de-al-menos-32-caracteres",
+        secureCookie: true,
+      },
+    });
+    await request(service.app).get("/api/auth/session").expect(200, { enabled: true, authenticated: false });
+    await request(service.app).get("/api/limits").expect(401);
+    await request(service.app).post("/api/jobs").attach("file", await pdf(), "x.pdf").expect(401);
+    await request(service.app).post("/api/auth/login").send({ username: "admin", password: "mal" }).expect(401);
+    const login = await request(service.app)
+      .post("/api/auth/login")
+      .send({ username: "admin", password: "una-contraseña-segura" })
+      .expect(200);
+    const cookie = login.headers["set-cookie"][0].split(";")[0];
+    expect(login.headers["set-cookie"][0]).toContain("HttpOnly");
+    expect(login.headers["set-cookie"][0]).toContain("Secure");
+    await request(service.app).get("/api/auth/session").set("Cookie", cookie)
+      .expect(200, { enabled: true, authenticated: true });
+    await request(service.app).post("/api/jobs").set("Cookie", cookie)
+      .set("Origin", "https://otro-dominio.test")
+      .attach("file", await pdf(), "x.pdf").expect(403);
+    const uploaded = await request(service.app).post("/api/jobs")
+      .set("Cookie", cookie).attach("file", await pdf(), "x.pdf").expect(202);
+    await service.idle();
+    await request(service.app).get(`/api/jobs/${uploaded.body.job.id}`)
+      .set("Cookie", cookie).expect(404);
+    await request(service.app).get(`/api/jobs/${uploaded.body.job.id}`)
+      .set("Cookie", cookie)
+      .set("Authorization", `Bearer ${uploaded.body.token}`).expect(200);
+    await request(service.app).post("/api/auth/logout").set("Cookie", cookie).expect(204);
+    await request(service.app).get("/api/limits").expect(401);
+  });
+  it("bloquea intentos reiterados y rechaza cookies modificadas", async () => {
+    const salt = Buffer.alloc(16, 4);
+    const service = createApp(new MemoryStore(), {
+      ...settings,
+      auth: {
+        username: "admin",
+        passwordHash: `scrypt:${salt.toString("hex")}:${scryptSync("test-password-123", salt, 64).toString("hex")}`,
+        sessionSecret: "un-secreto-distinto-de-al-menos-32-caracteres",
+        secureCookie: false,
+      },
+    });
+    await request(service.app).get("/api/limits")
+      .set("Cookie", "folio_session=9999999999999." + "0".repeat(64)).expect(401);
+    for (let i = 0; i < 5; i++)
+      await request(service.app).post("/api/auth/login")
+        .send({ username: "admin", password: "incorrecta" }).expect(401);
+    await request(service.app).post("/api/auth/login")
+      .send({ username: "admin", password: "test-password-123" }).expect(429);
+  });
   it("carga, autoriza, guarda, revisa, descarga idéntico e invalida tras editar", async () => {
     const store = new MemoryStore(),
       service = createApp(store, settings);

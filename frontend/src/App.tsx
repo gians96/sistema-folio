@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -10,6 +10,7 @@ import {
   FileCheck2,
   FileText,
   Layers,
+  LogOut,
   LoaderCircle,
   RotateCw,
   ShieldCheck,
@@ -98,7 +99,7 @@ function initialSession(): Session | null {
     return null;
   }
 }
-export default function App() {
+function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: () => void }) {
   const [session, setSession] = useState<Session | null>(initialSession);
   const [job, setJob] = useState<JobView | null>(null);
   const [config, setConfig] = useState<FolioConfig | null>(null);
@@ -342,8 +343,9 @@ export default function App() {
         <span className="tagline">Cada página, en su lugar.</span>
         <div className="local-badge">
           <span />
-          Espacio de trabajo local
+          {authEnabled ? "Espacio de trabajo privado" : "Espacio de trabajo local"}
         </div>
+        {authEnabled && <button className="logout-button" onClick={onLogout}><LogOut size={16} /> Cerrar sesión</button>}
       </header>
       <main>
         <div className="heading">
@@ -985,4 +987,61 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+export default function App() {
+  const [auth, setAuth] = useState<{ enabled: boolean; authenticated: boolean } | null>(null);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api<{ enabled: boolean; authenticated: boolean }>("/auth/session")
+      .then(setAuth)
+      .catch((reason) => setError((reason as Error).message));
+    const expired = () => setAuth({ enabled: true, authenticated: false });
+    window.addEventListener("folio:unauthorized", expired);
+    return () => window.removeEventListener("folio:unauthorized", expired);
+  }, []);
+  async function login(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api("/auth/login", null, {
+        method: "POST",
+        body: JSON.stringify({ username, password }),
+      });
+      setPassword("");
+      setAuth({ enabled: true, authenticated: true });
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function logout() {
+    try {
+      await api("/auth/logout", null, { method: "POST" });
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      sessionStorage.removeItem("folio-session");
+      setAuth({ enabled: true, authenticated: false });
+    }
+  }
+  if (!auth?.authenticated) return (
+    <div className="auth-screen">
+      <form className="auth-card" onSubmit={(event) => void login(event)}>
+        <div className="brand"><span className="brand-icon"><Layers size={23} /></span>folio<span className="brand-dot">.</span></div>
+        <h1>Acceso privado</h1>
+        <p>Inicia sesión para organizar y foliar tus documentos.</p>
+        {error && <div role="alert" className="alert">{error}</div>}
+        <label>Usuario<input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label>
+        <label>Contraseña<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
+        <button className="primary" disabled={busy || !auth}>{busy ? "Ingresando…" : "Ingresar"}</button>
+      </form>
+    </div>
+  );
+  return <Workspace authEnabled={auth.enabled} onLogout={() => void logout()} />;
 }

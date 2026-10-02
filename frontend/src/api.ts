@@ -15,6 +15,8 @@ export async function api<T>(
     },
   });
   if (!response.ok) {
+    if (response.status === 401 && !url.startsWith("/auth/"))
+      window.dispatchEvent(new Event("folio:unauthorized"));
     const body = await response
       .json()
       .catch(() => ({ error: "No se pudo conectar con el servidor." }));

@@ -25,6 +25,7 @@ import { configSchema, defaultConfig, type JobView } from "@folio/shared";
 import { inspectPdf, renderPdf } from "./pdf.js";
 import { convertWord } from "./convert.js";
 import type { Store, Job } from "./store.js";
+import { installAuth, type AuthSettings } from "./auth.js";
 
 export type Settings = {
   dataDir: string;
@@ -33,6 +34,7 @@ export type Settings = {
   ttlMs: number;
   conversionTimeout: number;
   soffice?: string;
+  auth?: AuthSettings;
 };
 class HttpError extends Error {
   constructor(
@@ -58,6 +60,7 @@ export function createApp(
     res.setHeader("Cache-Control", "no-store");
     next();
   });
+  installAuth(app, settings.auth);
   const root = path.resolve(settings.dataDir);
   const dir = (id: string) => {
     if (!z.string().uuid().safeParse(id).success)

@@ -8,6 +8,11 @@ test("cargar, editar, revisar y descargar un PDF", async ({ page }) => {
     p.drawText(`DOCUMENTO DE PRUEBA - ${i}`, { x: 70, y: 700, size: 20, font });
   }
   await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Acceso privado" })).toBeVisible();
+  await page.getByLabel("Usuario").fill("admin");
+  await page.getByLabel("Contraseña").fill("test-password-123");
+  await page.getByRole("button", { name: "Ingresar" }).click();
+  await expect(page.getByRole("heading", { name: "Foliar documentos" })).toBeVisible();
   await page.screenshot({ path: "test-results/inicio.png", fullPage: true });
   await page
     .getByLabel("Seleccionar documento", { exact: true })
@@ -72,4 +77,6 @@ test("cargar, editar, revisar y descargar un PDF", async ({ page }) => {
     0,
   );
   await expect(page.getByText("Cambios sin guardar")).toBeVisible();
+  await page.getByRole("button", { name: "Cerrar sesión" }).click();
+  await expect(page.getByRole("heading", { name: "Acceso privado" })).toBeVisible();
 });

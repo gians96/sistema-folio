@@ -8,7 +8,7 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: process.env.API_PROXY ?? "http://localhost:3001",
-        changeOrigin: true,
+        changeOrigin: false,
       },
     },
   },
