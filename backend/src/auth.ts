@@ -26,9 +26,9 @@ export function passwordMatches(password: string, stored: string) {
 export function installAuth(
   app: Express,
   settings?: AuthSettings,
+  allowedOrigins: ReadonlySet<string> = new Set(),
 ) {
   const failures = new Map<string, { count: number; until: number }>();
-  if (settings) app.set("trust proxy", 2);
   const sign = (expires: string) =>
     createHmac("sha256", settings!.sessionSecret).update(expires).digest("hex");
   const authenticated = (req: Request) => {
@@ -45,9 +45,10 @@ export function installAuth(
     if (Number(expires) <= Date.now()) return false;
     return timingSafeEqual(Buffer.from(sign(expires)), Buffer.from(signature));
   };
+  // Mismo host o un frontend declarado en CORS_ORIGINS (p. ej. otro subdominio).
   const sameOrigin = (req: Request) => {
     const origin = req.get("origin");
-    if (!origin) return true;
+    if (!origin || allowedOrigins.has(origin)) return true;
     try {
       return new URL(origin).host === req.get("host");
     } catch {

@@ -81,6 +81,51 @@ describe("API de trabajos", () => {
     await request(service.app).post("/api/auth/logout").set("Cookie", cookie).expect(204);
     await request(service.app).get("/api/limits").expect(401);
   });
+  it("acepta el frontend de otro subdominio con CORS y rechaza los demás orígenes", async () => {
+    const salt = Buffer.alloc(16, 5);
+    const frontend = "https://folio.ejemplo.test";
+    const service = createApp(new MemoryStore(), {
+      ...settings,
+      corsOrigins: [frontend],
+      auth: {
+        username: "admin",
+        passwordHash: `scrypt:${salt.toString("hex")}:${scryptSync("test-password-123", salt, 64).toString("hex")}`,
+        sessionSecret: "un-secreto-para-cors-de-al-menos-32-caracteres",
+        secureCookie: true,
+      },
+    });
+    const preflight = await request(service.app).options("/api/jobs")
+      .set("Origin", frontend)
+      .set("Access-Control-Request-Method", "POST")
+      .set("Access-Control-Request-Headers", "authorization")
+      .expect(204);
+    expect(preflight.headers["access-control-allow-origin"]).toBe(frontend);
+    expect(preflight.headers["access-control-allow-credentials"]).toBe("true");
+    expect(preflight.headers["access-control-allow-headers"]).toContain("Authorization");
+    await request(service.app).options("/api/jobs")
+      .set("Origin", "https://otro-dominio.test")
+      .set("Access-Control-Request-Method", "POST")
+      .expect(401);
+    const login = await request(service.app).post("/api/auth/login")
+      .set("Origin", frontend)
+      .send({ username: "admin", password: "test-password-123" })
+      .expect(200);
+    expect(login.headers["access-control-allow-origin"]).toBe(frontend);
+    const cookie = login.headers["set-cookie"][0].split(";")[0];
+    const uploaded = await request(service.app).post("/api/jobs")
+      .set("Origin", frontend).set("Cookie", cookie)
+      .attach("file", await pdf(), "x.pdf").expect(202);
+    expect(uploaded.headers["access-control-allow-origin"]).toBe(frontend);
+    const other = await request(service.app).post("/api/jobs")
+      .set("Origin", "https://otro-dominio.test").set("Cookie", cookie)
+      .attach("file", await pdf(), "x.pdf").expect(403);
+    expect(other.headers["access-control-allow-origin"]).toBeUndefined();
+    await request(service.app).post("/api/auth/login")
+      .set("Origin", "https://otro-dominio.test")
+      .send({ username: "admin", password: "test-password-123" })
+      .expect(403);
+    await service.idle();
+  });
   it("bloquea intentos reiterados y rechaza cookies modificadas", async () => {
     const salt = Buffer.alloc(16, 4);
     const service = createApp(new MemoryStore(), {

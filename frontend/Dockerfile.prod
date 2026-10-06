@@ -10,6 +10,9 @@ RUN pnpm install --frozen-lockfile
 COPY tsconfig.base.json ./
 COPY shared shared
 COPY frontend frontend
+# URL pública de la API (p. ej. https://api-folio.ejemplo.com). Vite la incrusta al compilar.
+ARG VITE_API_URL
+ENV VITE_API_URL=$VITE_API_URL
 RUN pnpm --filter @folio/shared build && pnpm --filter @folio/frontend build
 
 FROM nginxinc/nginx-unprivileged:stable-alpine

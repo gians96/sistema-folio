@@ -37,6 +37,10 @@ export type Settings = {
   conversionTimeout: number;
   soffice?: string;
   auth?: AuthSettings;
+  /** Orígenes del frontend autorizados a llamar a la API con credenciales (CORS). */
+  corsOrigins?: string[];
+  /** Proxies inversos delante del backend; 0 = conexión directa. */
+  trustProxy?: number;
 };
 class HttpError extends Error {
   constructor(
@@ -56,13 +60,28 @@ export function createApp(
   converter = convertWord,
 ) {
   const app = express();
-  app.use(helmet());
+  if (settings.trustProxy) app.set("trust proxy", settings.trustProxy);
+  const origins = new Set(settings.corsOrigins);
+  app.use(helmet({ crossOriginResourcePolicy: { policy: "same-site" } }));
+  // Va antes del login: las solicitudes preliminares (OPTIONS) no llevan cookie.
+  app.use((req, res, next) => {
+    res.vary("Origin");
+    const origin = req.get("origin");
+    if (!origin || !origins.has(origin)) return next();
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    if (req.method !== "OPTIONS") return next();
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE");
+    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+    res.setHeader("Access-Control-Max-Age", "600");
+    res.status(204).end();
+  });
   app.use(express.json({ limit: "1mb" }));
   app.use("/api", (_req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     next();
   });
-  installAuth(app, settings.auth);
+  installAuth(app, settings.auth, origins);
   const root = path.resolve(settings.dataDir);
   const dir = (id: string) => {
     if (!z.string().uuid().safeParse(id).success)

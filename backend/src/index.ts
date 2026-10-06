@@ -27,6 +27,20 @@ const auth: AuthSettings | undefined = authVars.every(Boolean) ? {
   sessionSecret: process.env.SESSION_SECRET!,
   secureCookie: production,
 } : undefined;
+const corsOrigins = (process.env.CORS_ORIGINS ?? "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean)
+  .map((value) => {
+    try {
+      return new URL(value).origin;
+    } catch {
+      throw new Error(`CORS_ORIGINS no es válido: "${value}". Usa URLs completas, p. ej. https://folio.ejemplo.com.`);
+    }
+  });
+const trustProxy = Number(process.env.TRUST_PROXY ?? 0);
+if (!Number.isInteger(trustProxy) || trustProxy < 0)
+  throw new Error("TRUST_PROXY debe ser un número entero de proxies (0, 1, 2...).");
 const db = new PrismaClient();
 await db.$connect();
 const service = createApp(prismaStore(db), {
@@ -37,6 +51,8 @@ const service = createApp(prismaStore(db), {
   conversionTimeout: Number(process.env.CONVERSION_TIMEOUT_MS ?? 120000),
   soffice: process.env.SOFFICE_PATH ?? (process.platform === "win32" ? "C:\\Program Files\\LibreOffice\\program\\soffice.com" : "soffice"),
   auth,
+  corsOrigins,
+  trustProxy,
 });
 await service.recover();
 const timer = setInterval(() => service.cleanup().catch(console.error), 60000);

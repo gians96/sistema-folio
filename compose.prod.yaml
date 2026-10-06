@@ -1,3 +1,7 @@
+# Producción en Dokploy (servicio Docker Compose). Dominios en la UI de Dokploy:
+#   frontend -> FRONTEND_URL (p. ej. folio.nube-tec.com),     puerto 8080
+#   backend  -> API_URL      (p. ej. api-folio.nube-tec.com), puerto 3001
+# MySQL no se publica. Variables: ver .env.dokploy.example.
 services:
   mysql:
     image: mysql:8.4
@@ -33,6 +37,12 @@ services:
       ADMIN_USER: ${ADMIN_USER:?Configura ADMIN_USER}
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?Configura ADMIN_PASSWORD_HASH}
       SESSION_SECRET: ${SESSION_SECRET:?Configura SESSION_SECRET}
+      # El frontend llama a la API desde otro subdominio: solo ese origen recibe CORS con credenciales.
+      CORS_ORIGINS: ${FRONTEND_URL:?Configura FRONTEND_URL}
+      # Proxies delante del backend: 2 con Cloudflare (nube naranja) + Traefik, 1 solo con Traefik.
+      TRUST_PROXY: ${TRUST_PROXY:-2}
+    expose:
+      - "3001"
     volumes:
       - document_data:/data
     depends_on:
@@ -49,10 +59,9 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile.prod
+      args:
+        VITE_API_URL: ${API_URL:?Configura API_URL}
     restart: unless-stopped
-    depends_on:
-      backend:
-        condition: service_healthy
     expose:
       - "8080"
     healthcheck:
