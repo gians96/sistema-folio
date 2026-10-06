@@ -13,8 +13,7 @@
     "test": "pnpm --filter @folio/backend test",
     "test:e2e": "playwright test",
     "test:local": "node scripts/local-smoke.mjs",
-    "db:generate": "pnpm --filter @folio/backend db:generate",
-    "auth:hash": "node scripts/hash-password.mjs"
+    "db:generate": "pnpm --filter @folio/backend db:generate"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",

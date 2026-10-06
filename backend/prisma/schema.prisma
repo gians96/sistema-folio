@@ -5,18 +5,38 @@ datasource db {
   provider = "mysql"
   url = env("DATABASE_URL")
 }
+model User {
+  id String @id @db.VarChar(36)
+  googleSub String @unique @db.VarChar(191)
+  email String @db.VarChar(191)
+  name String @db.VarChar(255)
+  picture String? @db.VarChar(1024)
+  role String @default("user") @db.VarChar(16)
+  status String @default("active") @db.VarChar(16)
+  maxFileMb Int?
+  createdAt DateTime @default(now())
+  lastLoginAt DateTime?
+  jobs Job[]
+  @@index([email])
+}
+model Setting {
+  key String @id @db.VarChar(64)
+  value String @db.Text
+}
 model Job {
   id String @id @db.VarChar(36)
-  tokenHash String @db.Char(64)
+  userId String @db.VarChar(36)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title String @db.VarChar(255)
   name String @db.VarChar(255)
   kind String @db.VarChar(8)
   status String @db.VarChar(24)
   createdAt DateTime @default(now())
-  expiresAt DateTime
+  updatedAt DateTime @default(now()) @updatedAt
   pages Json
   config Json?
   revision Int @default(0)
   renderedRevision Int?
   error String? @db.Text
-  @@index([expiresAt])
+  @@index([userId, updatedAt])
 }

@@ -46,6 +46,8 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Google pide esta política para el botón de acceso en http://localhost.
+    headers: { "Referrer-Policy": "no-referrer-when-downgrade" },
     proxy: {
       "/api": {
         target: process.env.API_PROXY ?? "http://localhost:3001",

@@ -80,17 +80,79 @@ export type JobStatus =
   | "failed";
 export type JobView = {
   id: string;
+  userId: string;
+  /** Nombre del trabajo, editable (p. ej. "CAS 003"). */
+  title: string;
+  /** Nombre del primer archivo cargado. */
   name: string;
   kind: "pdf" | "doc" | "docx";
   status: JobStatus;
   createdAt: string;
-  expiresAt: string;
+  updatedAt: string;
   pages: PageInfo[];
   config: FolioConfig | null;
   revision: number;
   renderedRevision: number | null;
   error: string | null;
 };
+/** Trabajo resumido para los listados. */
+export type JobSummary = Pick<
+  JobView,
+  | "id"
+  | "userId"
+  | "title"
+  | "name"
+  | "kind"
+  | "status"
+  | "createdAt"
+  | "updatedAt"
+  | "error"
+> & {
+  pages: number;
+  included: number;
+  owner: { email: string; name: string };
+};
+export type UserRole = "owner" | "user";
+export type UserStatus = "active" | "pending" | "blocked";
+export type UserView = {
+  id: string;
+  email: string;
+  name: string;
+  picture: string | null;
+  role: UserRole;
+  status: UserStatus;
+  /** Límite propio por archivo; null = límite general. */
+  maxFileMb: number | null;
+  createdAt: string;
+  lastLoginAt: string | null;
+};
+export type AdminUser = UserView & { jobs: number };
+export type SessionView = { googleClientId: string; user: UserView | null };
+export type Limits = { maxBytes: number; maxPages: number };
+export const titleSchema = z
+  .string()
+  .trim()
+  .min(1, "Escribe un nombre para el trabajo.")
+  .max(120, "Usa como máximo 120 caracteres en el nombre.");
+/** MB por archivo; 0 = sin límite. */
+export const maxFileMbSchema = z
+  .number()
+  .int("Usa un número entero de MB.")
+  .min(0, "El límite no puede ser negativo.")
+  .max(2048, "El límite no puede superar 2048 MB.");
+export const adminSettingsSchema = z
+  .object({
+    maxFileMb: maxFileMbSchema,
+    registration: z.enum(["open", "approval"]),
+  })
+  .strict();
+export type AdminSettings = z.infer<typeof adminSettingsSchema>;
+export const userPatchSchema = z
+  .object({
+    status: z.enum(["active", "blocked"]).optional(),
+    maxFileMb: maxFileMbSchema.nullable().optional(),
+  })
+  .strict();
 export const defaultPosition: Position = {
   corner: "top-right",
   marginX: 10,

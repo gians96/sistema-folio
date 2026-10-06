@@ -1,10 +1,10 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
   type DragEvent,
-  type FormEvent,
   type WheelEvent,
 } from "react";
 import {
@@ -43,11 +43,25 @@ import {
   folios,
   type FolioConfig,
   type JobView,
+  type Limits,
   type PageEdit,
   type Position,
+  type SessionView,
+  type UserView,
 } from "@folio/shared";
-import { api, type Session } from "./api";
+import { api } from "./api";
 import { PdfPage, usePdf } from "./PdfView";
+import { Admin, Avatar } from "./Admin";
+import { Dashboard } from "./Dashboard";
+import { EditableTitle } from "./EditableTitle";
+import { Login } from "./Login";
+import {
+  confirmLeave,
+  navigate,
+  setUnsaved,
+  useRoute,
+  type Route,
+} from "./route";
 
 const corners: [Position["corner"], string, string][] = [
   ["top-left", "Superior izquierda", "↖"],
@@ -139,15 +153,11 @@ function storeFlag(key: string, value: boolean) {
     // Preferencia opcional: sin almacenamiento solo dura la sesión.
   }
 }
-function initialSession(): Session | null {
-  try {
-    return JSON.parse(sessionStorage.getItem("folio-session") ?? "null");
-  } catch {
-    return null;
-  }
-}
-function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: () => void }) {
-  const [session, setSession] = useState<Session | null>(initialSession);
+/** Archivos que faltan añadir a un trabajo recién creado (se cargaron varios a la vez). */
+const pendingFiles = new Map<string, File[]>();
+const fileName = (title: string) =>
+  title.replace(/[\\/:*?"<>|\x00-\x1f]+/g, "-").trim() || "documento";
+function Workspace({ jobId, user }: { jobId: string | null; user: UserView }) {
   const [job, setJob] = useState<JobView | null>(null);
   const [config, setConfig] = useState<FolioConfig | null>(null);
   const [source, setSource] = useState<ArrayBuffer | null>(null);
@@ -194,10 +204,9 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
     acc: 0,
     scrollTo: "" as "" | "top" | "bottom",
   });
-  const [limits, setLimits] = useState({
+  const [limits, setLimits] = useState<Limits>({
     maxBytes: 0,
     maxPages: 500,
-    ttlHours: 24,
   });
   const fileInput = useRef<HTMLInputElement>(null);
   const addInput = useRef<HTMLInputElement>(null);
@@ -209,21 +218,23 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
   const sourcePdf = usePdf(source),
     reviewPdf = usePdf(review);
   useEffect(() => {
-    api<typeof limits>("/limits")
+    api<Limits>("/limits")
       .then(setLimits)
       .catch(() => {});
   }, []);
   useEffect(() => {
-    if (!session) {
-      sessionStorage.removeItem("folio-session");
-      return;
+    if (!jobId) return;
+    // Los demás archivos de una carga múltiple se añaden cuando el documento esté listo.
+    const files = pendingFiles.get(jobId);
+    if (files) {
+      pendingFiles.delete(jobId);
+      queued.current = files;
     }
-    sessionStorage.setItem("folio-session", JSON.stringify(session));
     let cancelled = false,
       timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
-        const result = await api<JobView>(`/jobs/${session.id}`, session);
+        const result = await api<JobView>(`/jobs/${jobId}`);
         if (cancelled) return;
         setJob(result);
         if (result.status === "processing") {
@@ -234,10 +245,7 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
           setConfig({ ...result.config, digits: Math.max(2, result.config.digits) });
           setSelected(result.config.pages[0].id);
           setDirty(result.config.digits < 2);
-          const bytes = await api<ArrayBuffer>(
-            `/jobs/${session.id}/source`,
-            session,
-          );
+          const bytes = await api<ArrayBuffer>(`/jobs/${jobId}/source`);
           if (!cancelled) setSource(bytes);
         }
         if (result.error) setError(result.error);
@@ -250,7 +258,11 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [session]);
+  }, [jobId]);
+  useEffect(() => {
+    setUnsaved(dirty);
+    return () => setUnsaved(false);
+  }, [dirty]);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (dirty) {
@@ -277,24 +289,17 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
       setError(invalid);
       return;
     }
-    queued.current = rest;
     setBusy("Cargando documento…");
     try {
       const form = new FormData();
       form.append("file", file);
-      const result = await api<{ job: JobView; token: string }>("/jobs", null, {
+      const result = await api<{ job: JobView }>("/jobs", {
         method: "POST",
         body: form,
       });
-      setJob(result.job);
-      setConfig(null);
-      setSource(null);
-      setReview(null);
-      setDirty(false);
-      setMode("edit");
-      setSession({ id: result.job.id, token: result.token });
+      if (rest.length) pendingFiles.set(result.job.id, rest);
+      navigate(`/trabajo/${result.job.id}`);
     } catch (e) {
-      queued.current = [];
       setError((e as Error).message);
     } finally {
       setBusy("");
@@ -302,7 +307,7 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
     }
   }
   async function appendFiles(files: File[], position?: number) {
-    if (!session || !job || !config || busy || !files.length) return;
+    if (!jobId || !job || !config || busy || !files.length) return;
     setError("");
     const invalid = files.map(invalidFile).find(Boolean);
     if (invalid) {
@@ -326,8 +331,7 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
         const form = new FormData();
         form.append("file", file);
         latest = await api<JobView>(
-          `/jobs/${session.id}/files?revision=${revision}${at === undefined ? "" : `&position=${at}`}`,
-          session,
+          `/jobs/${jobId}/files?revision=${revision}${at === undefined ? "" : `&position=${at}`}`,
           { method: "POST", body: form },
         );
         revision = latest.revision;
@@ -348,9 +352,7 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
         setMode("edit");
         setSelected(latest.config.pages[before]?.id ?? selected);
         try {
-          setSource(
-            await api<ArrayBuffer>(`/jobs/${session.id}/source`, session),
-          );
+          setSource(await api<ArrayBuffer>(`/jobs/${jobId}/source`));
         } catch (e) {
           setError((e as Error).message);
         }
@@ -499,11 +501,11 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
     setSelected(id);
   }
   async function save(): Promise<JobView | null> {
-    if (!session || !job || !config) return null;
+    if (!jobId || !job || !config) return null;
     const validation = configSchema.safeParse(config);
     if (!validation.success)
       throw new Error(validation.error.issues.map((i) => i.message).join(" "));
-    const updated = await api<JobView>(`/jobs/${session.id}/config`, session, {
+    const updated = await api<JobView>(`/jobs/${jobId}/config`, {
       method: "PUT",
       body: JSON.stringify({ revision: job.revision, config }),
     });
@@ -512,7 +514,7 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
     return updated;
   }
   async function generate() {
-    if (!session || !config) return;
+    if (!jobId || !config) return;
     setBusy("Preparando revisión…");
     setError("");
     setReview(null);
@@ -520,14 +522,13 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
     try {
       const saved = await save();
       if (!saved) return;
-      const result = await api<JobView>(`/jobs/${session.id}/render`, session, {
+      const result = await api<JobView>(`/jobs/${jobId}/render`, {
         method: "POST",
         body: JSON.stringify({ revision: saved.revision }),
       });
       setJob(result);
       const bytes = await api<ArrayBuffer>(
-        `/jobs/${session.id}/preview?revision=${result.revision}`,
-        session,
+        `/jobs/${jobId}/preview?revision=${result.revision}`,
       );
       setReview(bytes);
       setReviewIndex(0);
@@ -539,20 +540,19 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
     }
   }
   async function download() {
-    if (!session || !job || !review || dirty) return;
+    if (!jobId || !job || !review || dirty) return;
     setBusy("Descargando…");
     setError("");
     try {
       const bytes = await api<ArrayBuffer>(
-        `/jobs/${session.id}/download?revision=${job.revision}`,
-        session,
+        `/jobs/${jobId}/download?revision=${job.revision}`,
       );
       const url = URL.createObjectURL(
         new Blob([bytes], { type: "application/pdf" }),
       );
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${job.name.replace(/\.[^.]+$/, "")}-foliado.pdf`;
+      a.download = `${fileName(job.title)}-foliado.pdf`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (e) {
@@ -561,35 +561,39 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
       setBusy("");
     }
   }
-  async function remove() {
+  /** Elimina el trabajo y vuelve a Mis trabajos. */
+  async function remove(ask = true) {
     if (
-      !session ||
-      !confirm(
-        "¿Eliminar este trabajo y sus archivos? Esta acción no se puede deshacer.",
-      )
+      !jobId ||
+      (ask &&
+        !confirm(
+          "¿Eliminar este trabajo y sus archivos? Esta acción no se puede deshacer.",
+        ))
     )
       return;
     setBusy("Eliminando…");
     try {
-      await api(`/jobs/${session.id}`, session, { method: "DELETE" });
-      reset();
+      await api(`/jobs/${jobId}`, { method: "DELETE" });
+      setUnsaved(false);
+      navigate("/");
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy("");
     }
   }
-  function reset() {
-    queued.current = [];
-    setPicked([]);
-    setSession(null);
-    setJob(null);
-    setConfig(null);
-    setSource(null);
-    setReview(null);
-    setDirty(false);
+  async function rename(title: string) {
+    if (!jobId) return;
     setError("");
-    setMode("edit");
+    try {
+      const updated = await api<JobView>(`/jobs/${jobId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      });
+      setJob((current) => current && { ...current, title: updated.title });
+    } catch (e) {
+      setError((e as Error).message);
+    }
   }
   const page = config?.pages.find((p) => p.id === selected);
   const pageIndex = config?.pages.findIndex((p) => p.id === selected) ?? 0;
@@ -700,11 +704,11 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
   }, [!!config]);
   useEffect(() => {
     // Al abrir un documento, el área de trabajo queda ajustada a la ventana.
-    if (!session || !config) return;
-    if (positioned.current === session.id) return;
-    positioned.current = session.id;
+    if (!jobId || !config) return;
+    if (positioned.current === jobId) return;
+    positioned.current = jobId;
     documentBar.current?.scrollIntoView({ block: "start", behavior: "smooth" });
-  }, [session, !!config]);
+  }, [jobId, !!config]);
   function onViewerWheel(e: WheelEvent<HTMLDivElement>) {
     if (!config || e.ctrlKey || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
     const el = e.currentTarget,
@@ -788,22 +792,7 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
   const hasFiles = (e: DragEvent) =>
     e.dataTransfer.types.includes("Files");
   return (
-    <div className="app">
-      <header className="topbar">
-        <a className="brand" href="/" aria-label="Folio, inicio">
-          <span className="brand-icon">
-            <Layers size={23} />
-          </span>
-          folio<span className="brand-dot">.</span>
-        </a>
-        <span className="topbar-divider" />
-        <span className="tagline">Cada página, en su lugar.</span>
-        <div className="local-badge">
-          <span />
-          {authEnabled ? "Espacio de trabajo privado" : "Espacio de trabajo local"}
-        </div>
-        {authEnabled && <button className="logout-button" onClick={onLogout}><LogOut size={16} /> Cerrar sesión</button>}
-      </header>
+    <>
       <main>
         <div className="heading">
           <div>
@@ -814,9 +803,9 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
           <div className="privacy">
             <ShieldCheck size={19} />
             <span>
-              Archivos temporales
+              Guardado en tu cuenta
               <br />
-              <strong>Se eliminan en {limits.ttlHours} horas</strong>
+              <strong>Disponible hasta que lo elimines</strong>
             </span>
           </div>
         </div>
@@ -867,7 +856,7 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
           aria-label="Añadir documentos"
           onChange={(e) => void appendFiles([...(e.target.files ?? [])])}
         />
-        {!session ? (
+        {!jobId ? (
           <>
             <section
               className={`upload-card ${dragging ? "dragging" : ""}`}
@@ -939,26 +928,40 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
         ) : !config ? (
           <section className="processing">
             <div className="upload-icon">
-              {job?.status === "failed" ? (
+              {job?.status === "failed" || (!job && error) ? (
                 <FileText size={32} />
               ) : (
                 <LoaderCircle className="spin" size={32} />
               )}
             </div>
             <h2>
-              {job?.status === "failed"
-                ? "No pudimos preparar el documento"
-                : "Preparando tu documento"}
+              {!job && error
+                ? "No pudimos abrir este trabajo"
+                : job?.status === "failed"
+                  ? "No pudimos preparar el documento"
+                  : "Preparando tu documento"}
             </h2>
             <p>{job?.name}</p>
             <p>
-              {job?.status === "failed"
-                ? "Comprueba el archivo y vuelve a cargarlo."
-                : "Estamos leyendo las páginas. Los archivos Word se convierten a PDF."}
+              {!job && error
+                ? "Puede que se haya eliminado o que no tengas acceso."
+                : job?.status === "failed"
+                  ? "Comprueba el archivo y vuelve a cargarlo en un trabajo nuevo."
+                  : "Estamos leyendo las páginas. Los archivos Word se convierten a PDF."}
             </p>
-            <button className="secondary" disabled={!!busy} onClick={reset}>
-              Volver a cargar
-            </button>
+            {job?.status === "failed" ? (
+              <button
+                className="secondary"
+                disabled={!!busy}
+                onClick={() => void remove(false)}
+              >
+                Eliminar y volver
+              </button>
+            ) : (
+              <a className="secondary" href="#/">
+                Volver a Mis trabajos
+              </a>
+            )}
           </section>
         ) : (
           <>
@@ -966,10 +969,17 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
               <div className="document-name">
                 <FileText size={24} />
                 <div>
-                  <strong title={job?.name}>{job?.name}</strong>
-                  <small>
+                  {job && (
+                    <EditableTitle
+                      value={job.title}
+                      disabled={!!busy}
+                      onSave={rename}
+                    />
+                  )}
+                  <small title={job?.name}>
                     {config.pages.length} páginas originales · {included} en el
                     PDF final
+                    {job && job.userId !== user.id && " · Trabajo de otro usuario"}
                   </small>
                 </div>
               </div>
@@ -977,21 +987,9 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                 <span className="save-state">
                   {dirty ? "Cambios sin guardar" : "Edición guardada"}
                 </span>
-                <button
-                  className="text-button"
-                  disabled={!!busy}
-                  onClick={() => {
-                    if (
-                      !dirty ||
-                      confirm(
-                        "¿Abrir otro documento y dejar los cambios sin guardar?",
-                      )
-                    )
-                      reset();
-                  }}
-                >
-                  Nuevo documento
-                </button>
+                <a className="text-button" href="#/nuevo">
+                  Nuevo trabajo
+                </a>
                 <button
                   className="text-button add-button"
                   disabled={!!busy}
@@ -1775,70 +1773,121 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
             )}
           </div>
         )}
-        {!session && (
+        {!jobId && (
           <footer>
             <span>Folio · Documentos en orden</span>
             <span>PDF de salida · Original sin modificaciones</span>
           </footer>
         )}
       </main>
-    </div>
+    </>
+  );
+}
+
+function Topbar({
+  user,
+  route,
+  onLogout,
+}: {
+  user: UserView;
+  route: Route;
+  onLogout: () => void;
+}) {
+  return (
+    <header className="topbar">
+      <a className="brand" href="#/" aria-label="Folio, mis trabajos">
+        <span className="brand-icon">
+          <Layers size={23} />
+        </span>
+        folio<span className="brand-dot">.</span>
+      </a>
+      <span className="topbar-divider" />
+      <span className="tagline">Cada página, en su lugar.</span>
+      <nav className="topnav" aria-label="Secciones">
+        <a
+          href="#/"
+          aria-current={route.view !== "admin" ? "page" : undefined}
+        >
+          Mis trabajos
+        </a>
+        {user.role === "owner" && (
+          <a
+            href="#/admin"
+            aria-current={route.view === "admin" ? "page" : undefined}
+          >
+            Administración
+          </a>
+        )}
+      </nav>
+      <div className="user-chip" title={user.email}>
+        <Avatar user={user} />
+        <span>{user.name}</span>
+      </div>
+      <button className="logout-button" onClick={onLogout}>
+        <LogOut size={16} /> Cerrar sesión
+      </button>
+    </header>
   );
 }
 
 export default function App() {
-  const [auth, setAuth] = useState<{ enabled: boolean; authenticated: boolean } | null>(null);
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
+  const [session, setSession] = useState<SessionView | null>(null);
+  // La sesión caducó con la aplicación abierta: se pide entrar de nuevo sin perder la vista.
+  const [expired, setExpired] = useState(false);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const route = useRoute();
   useEffect(() => {
-    api<{ enabled: boolean; authenticated: boolean }>("/auth/session")
-      .then(setAuth)
+    api<SessionView>("/auth/session")
+      .then(setSession)
       .catch((reason) => setError((reason as Error).message));
-    const expired = () => setAuth({ enabled: true, authenticated: false });
-    window.addEventListener("folio:unauthorized", expired);
-    return () => window.removeEventListener("folio:unauthorized", expired);
+    const onExpired = () => setExpired(true);
+    window.addEventListener("folio:unauthorized", onExpired);
+    return () => window.removeEventListener("folio:unauthorized", onExpired);
   }, []);
-  async function login(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      await api("/auth/login", null, {
-        method: "POST",
-        body: JSON.stringify({ username, password }),
-      });
-      setPassword("");
-      setAuth({ enabled: true, authenticated: true });
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
+  const onLogin = useCallback((user: UserView) => {
+    setSession((current) => current && { ...current, user });
+    setExpired(false);
+  }, []);
   async function logout() {
+    if (!confirmLeave()) return;
     try {
-      await api("/auth/logout", null, { method: "POST" });
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      sessionStorage.removeItem("folio-session");
-      setAuth({ enabled: true, authenticated: false });
+      await api("/auth/logout", { method: "POST" });
+    } catch {
+      // Sin conexión la cookie sigue, pero la sesión se cierra en esta ventana.
     }
+    setUnsaved(false);
+    setExpired(false);
+    setSession((current) => current && { ...current, user: null });
   }
-  if (!auth?.authenticated) return (
-    <div className="auth-screen">
-      <form className="auth-card" onSubmit={(event) => void login(event)}>
-        <div className="brand"><span className="brand-icon"><Layers size={23} /></span>folio<span className="brand-dot">.</span></div>
-        <h1>Acceso privado</h1>
-        <p>Inicia sesión para organizar y foliar tus documentos.</p>
-        {error && <div role="alert" className="alert">{error}</div>}
-        <label>Usuario<input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label>
-        <label>Contraseña<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
-        <button className="primary" disabled={busy || !auth}>{busy ? "Ingresando…" : "Ingresar"}</button>
-      </form>
+  if (!session)
+    return (
+      <div className="auth-screen">
+        {error ? (
+          <div role="alert" className="alert">
+            {error}
+          </div>
+        ) : (
+          <LoaderCircle className="spin" size={28} aria-label="Cargando" />
+        )}
+      </div>
+    );
+  const { user, googleClientId } = session;
+  if (!user) return <Login clientId={googleClientId} onLogin={onLogin} />;
+  return (
+    <div className="app">
+      <Topbar user={user} route={route} onLogout={() => void logout()} />
+      {route.view === "admin" && user.role === "owner" ? (
+        <Admin user={user} />
+      ) : route.view === "job" || route.view === "new" ? (
+        <Workspace
+          key={route.view === "job" ? route.id : "nuevo"}
+          jobId={route.view === "job" ? route.id : null}
+          user={user}
+        />
+      ) : (
+        <Dashboard />
+      )}
+      {expired && <Login overlay clientId={googleClientId} onLogin={onLogin} />}
     </div>
   );
-  return <Workspace authEnabled={auth.enabled} onLogout={() => void logout()} />;
 }

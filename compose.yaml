@@ -1,43 +1,23 @@
 services:
-  mysql:
-    image: mysql:8.4
-    environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-folio}
-      MYSQL_USER: ${MYSQL_USER:-folio}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-folio_local_dev}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-folio_root_local_dev}
-    ports:
-      - "127.0.0.1:3306:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "MYSQL_PWD=$$MYSQL_PASSWORD mysql -h 127.0.0.1 -u$$MYSQL_USER $$MYSQL_DATABASE -e 'SELECT 1'",
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 30
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
     init: true
     environment:
-      DATABASE_URL: mysql://${MYSQL_USER:-folio}:${MYSQL_PASSWORD:-folio_local_dev}@mysql:3306/${MYSQL_DATABASE:-folio}
+      # Base MySQL o MariaDB externa; ver .env.example.
+      DATABASE_URL: ${DATABASE_URL:?Configura DATABASE_URL}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?Configura GOOGLE_CLIENT_ID}
+      OWNER_EMAIL: ${OWNER_EMAIL:?Configura OWNER_EMAIL}
       DATA_DIR: /data
-      MAX_FILE_MB: ${MAX_FILE_MB:-0}
       MAX_PAGES: ${MAX_PAGES:-500}
-      JOB_TTL_HOURS: ${JOB_TTL_HOURS:-24}
       CONVERSION_TIMEOUT_MS: ${CONVERSION_TIMEOUT_MS:-120000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:3001:3001"
     volumes:
       - document_data:/data
-    depends_on:
-      mysql:
-        condition: service_healthy
     healthcheck:
       test:
         [
@@ -61,5 +41,4 @@ services:
       backend:
         condition: service_healthy
 volumes:
-  mysql_data:
   document_data:

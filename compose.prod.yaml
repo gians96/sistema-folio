@@ -1,25 +1,8 @@
 # Producción en Dokploy (servicio Docker Compose). Dominios en la UI de Dokploy:
 #   frontend -> FRONTEND_URL (p. ej. folio.nube-tec.com),     puerto 8080
 #   backend  -> API_URL      (p. ej. api-folio.nube-tec.com), puerto 3001
-# MySQL no se publica. Variables: ver .env.dokploy.example.
+# La base MySQL o MariaDB es externa (DATABASE_URL). Variables: ver .env.dokploy.example.
 services:
-  mysql:
-    image: mysql:8.4
-    restart: unless-stopped
-    environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:?Configura MYSQL_DATABASE}
-      MYSQL_USER: ${MYSQL_USER:?Configura MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Configura MYSQL_PASSWORD}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Configura MYSQL_ROOT_PASSWORD}
-    volumes:
-      - mysql_data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysql -h 127.0.0.1 -u$$MYSQL_USER $$MYSQL_DATABASE -e 'SELECT 1' >/dev/null"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-      start_period: 30s
-
   backend:
     build:
       context: .
@@ -27,27 +10,20 @@ services:
     restart: unless-stopped
     init: true
     environment:
-      DATABASE_URL: mysql://${MYSQL_USER:?Configura MYSQL_USER}:${MYSQL_PASSWORD:?Configura MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:?Configura MYSQL_DATABASE}
+      DATABASE_URL: ${DATABASE_URL:?Configura DATABASE_URL}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?Configura GOOGLE_CLIENT_ID}
+      OWNER_EMAIL: ${OWNER_EMAIL:?Configura OWNER_EMAIL}
       DATA_DIR: /data
       PORT: 3001
-      MAX_FILE_MB: ${MAX_FILE_MB:-0}
       MAX_PAGES: ${MAX_PAGES:-500}
-      JOB_TTL_HOURS: ${JOB_TTL_HOURS:-24}
       CONVERSION_TIMEOUT_MS: ${CONVERSION_TIMEOUT_MS:-120000}
-      ADMIN_USER: ${ADMIN_USER:?Configura ADMIN_USER}
-      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?Configura ADMIN_PASSWORD_HASH}
-      SESSION_SECRET: ${SESSION_SECRET:?Configura SESSION_SECRET}
       # El frontend llama a la API desde otro subdominio: solo ese origen recibe CORS con credenciales.
       CORS_ORIGINS: ${FRONTEND_URL:?Configura FRONTEND_URL}
-      # Proxies delante del backend: 2 con Cloudflare (nube naranja) + Traefik, 1 solo con Traefik.
-      TRUST_PROXY: ${TRUST_PROXY:-2}
     expose:
       - "3001"
     volumes:
+      # Documentos y la clave de las sesiones (.jwt-secret).
       - document_data:/data
-    depends_on:
-      mysql:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
@@ -71,5 +47,4 @@ services:
       retries: 5
 
 volumes:
-  mysql_data:
   document_data:

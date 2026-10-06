@@ -5,6 +5,9 @@ import path from "node:path";
 import { PDFDocument, StandardFonts, degrees } from "pdf-lib";
 
 const base = process.env.SMOKE_API ?? "http://localhost:3001/api";
+// La API exige sesión: valor de la cookie folio_session de una sesión iniciada en el navegador.
+const session = process.env.FOLIO_SESSION;
+assert(session, "Define FOLIO_SESSION con el valor de la cookie folio_session (DevTools > Aplicación > Cookies).");
 const directory = path.resolve("tmp/docker-smoke");
 await mkdir(directory, { recursive: true });
 const docker = (...args) =>
@@ -60,11 +63,11 @@ for (const angle of [0, 90, 180, 270]) {
 }
 await writeFile(path.join(directory, "sample.pdf"), await pdf.save());
 const jobs = [];
-async function call(route, token, options = {}) {
+async function call(route, options = {}) {
   const response = await fetch(`${base}${route}`, {
     ...options,
     headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      Cookie: `folio_session=${session}`,
       ...(options.body instanceof FormData
         ? {}
         : { "Content-Type": "application/json" }),
@@ -83,16 +86,16 @@ try {
       new Blob([await readFile(path.join(directory, `sample.${extension}`))]),
       `prueba.${extension}`,
     );
-    const { job: initial, token } = await (
-      await call("/jobs", null, { method: "POST", body: form })
+    const { job: initial } = await (
+      await call("/jobs", { method: "POST", body: form })
     ).json();
     const id = initial.id;
-    jobs.push({ id, token });
+    jobs.push(id);
     let job = initial;
     const deadline = Date.now() + 120000;
     while (job.status === "processing" && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 300));
-      job = await (await call(`/jobs/${id}`, token)).json();
+      job = await (await call(`/jobs/${id}`)).json();
     }
     assert.equal(
       job.status,
@@ -111,25 +114,25 @@ try {
       marginY: 12,
     };
     const saved = await (
-      await call(`/jobs/${id}/config`, token, {
+      await call(`/jobs/${id}/config`, {
         method: "PUT",
         body: JSON.stringify({ revision: job.revision, config }),
       })
     ).json();
     const rendered = await (
-      await call(`/jobs/${id}/render`, token, {
+      await call(`/jobs/${id}/render`, {
         method: "POST",
         body: JSON.stringify({ revision: saved.revision }),
       })
     ).json();
     const preview = Buffer.from(
       await (
-        await call(`/jobs/${id}/preview?revision=${rendered.revision}`, token)
+        await call(`/jobs/${id}/preview?revision=${rendered.revision}`)
       ).arrayBuffer(),
     );
     const download = Buffer.from(
       await (
-        await call(`/jobs/${id}/download?revision=${rendered.revision}`, token)
+        await call(`/jobs/${id}/download?revision=${rendered.revision}`)
       ).arrayBuffer(),
     );
     assert(preview.equals(download));
@@ -156,7 +159,7 @@ try {
   );
   console.log(timeoutResult.trim());
 } finally {
-  for (const { id, token } of jobs)
-    await call(`/jobs/${id}`, token, { method: "DELETE" });
+  for (const id of jobs)
+    await call(`/jobs/${id}`, { method: "DELETE" });
 }
 console.log("Verificación Docker completada. Trabajos de prueba eliminados.");
