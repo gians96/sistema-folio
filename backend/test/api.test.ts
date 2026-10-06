@@ -28,6 +28,11 @@ async function pdf() {
   doc.addPage([400, 300]);
   return Buffer.from(await doc.save());
 }
+async function onePage() {
+  const doc = await PDFDocument.create();
+  doc.addPage();
+  return Buffer.from(await doc.save());
+}
 const parseBinary = (
   res: any,
   callback: (e: Error | null, data?: Buffer) => void,
@@ -199,6 +204,70 @@ describe("API de trabajos", () => {
       .set("Authorization", `Bearer ${valid.body.token}`)
       .send({ revision: 1, config: job.config })
       .expect(400);
+  });
+  it("añade documentos al final conservando la edición existente", async () => {
+    const store = new MemoryStore(),
+      service = createApp(store, { ...settings, maxPages: 5 }, async () => pdf());
+    const uploaded = await request(service.app)
+      .post("/api/jobs")
+      .attach("file", await pdf(), "base.pdf")
+      .expect(202);
+    const { id } = uploaded.body.job,
+      auth = `Bearer ${uploaded.body.token}`;
+    await service.idle();
+    const job = (await store.get(id))!;
+    job.config!.pages[1].rotation = 90;
+    await request(service.app)
+      .put(`/api/jobs/${id}/config`)
+      .set("Authorization", auth)
+      .send({ revision: 1, config: job.config })
+      .expect(200);
+    await request(service.app)
+      .post(`/api/jobs/${id}/files?revision=1`)
+      .set("Authorization", auth)
+      .attach("file", await pdf(), "extra.pdf")
+      .expect(409);
+    const added = await request(service.app)
+      .post(`/api/jobs/${id}/files?revision=2`)
+      .set("Authorization", auth)
+      .attach("file", Buffer.from("504b0304", "hex"), "extra.docx")
+      .expect(200);
+    expect(added.body.revision).toBe(3);
+    expect(added.body.pages.map((p: any) => p.sourceIndex)).toEqual([0, 1, 2, 3]);
+    expect(added.body.config.pages[1].rotation).toBe(90);
+    expect(added.body.config.pages).toHaveLength(4);
+    const source = await request(service.app)
+      .get(`/api/jobs/${id}/source`)
+      .set("Authorization", auth)
+      .buffer(true)
+      .parse(parseBinary)
+      .expect(200);
+    expect((await PDFDocument.load(source.body)).getPageCount()).toBe(4);
+    await request(service.app)
+      .post(`/api/jobs/${id}/files?revision=3`)
+      .set("Authorization", auth)
+      .attach("file", await pdf(), "extra.pdf")
+      .expect(422);
+    expect((await store.get(id))!.pages).toHaveLength(4);
+    // Eliminar una página: la configuración conserva solo un subconjunto.
+    const trimmed = { ...added.body.config, pages: added.body.config.pages.slice(1) };
+    await request(service.app)
+      .put(`/api/jobs/${id}/config`)
+      .set("Authorization", auth)
+      .send({ revision: 3, config: trimmed })
+      .expect(200);
+    const inserted = await request(service.app)
+      .post(`/api/jobs/${id}/files?revision=4&position=1`)
+      .set("Authorization", auth)
+      .attach("file", await onePage(), "uno.pdf")
+      .expect(200);
+    expect(inserted.body.config.pages.map((p: any) => p.sourceIndex)).toEqual([1, 4, 2, 3]);
+    const render = await request(service.app)
+      .post(`/api/jobs/${id}/render`)
+      .set("Authorization", auth)
+      .send({ revision: 5 })
+      .expect(200);
+    expect(render.body.status).toBe("review");
   });
   it("convierte DOC y DOCX secuencialmente y expone fallos recuperables", async () => {
     let active = 0,

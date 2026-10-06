@@ -27,7 +27,7 @@ services:
     environment:
       DATABASE_URL: mysql://${MYSQL_USER:-folio}:${MYSQL_PASSWORD:-folio_local_dev}@mysql:3306/${MYSQL_DATABASE:-folio}
       DATA_DIR: /data
-      MAX_FILE_MB: ${MAX_FILE_MB:-50}
+      MAX_FILE_MB: ${MAX_FILE_MB:-0}
       MAX_PAGES: ${MAX_PAGES:-500}
       JOB_TTL_HOURS: ${JOB_TTL_HOURS:-24}
       CONVERSION_TIMEOUT_MS: ${CONVERSION_TIMEOUT_MS:-120000}

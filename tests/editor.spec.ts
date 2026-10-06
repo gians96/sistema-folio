@@ -41,9 +41,9 @@ test("cargar, editar, revisar y descargar un PDF", async ({ page }) => {
   await page.getByLabel("Ubicación propia para esta página").check();
   await page
     .getByRole("button", { name: "Inferior izquierda", exact: true })
-    .last()
+    .first()
     .click();
-  await page.getByRole("button", { name: "Girar", exact: true }).click();
+  await page.getByRole("button", { name: "Derecha", exact: true }).click();
   await expect(page.locator(".canvas-area .pdf-page")).toHaveAttribute(
     "data-rendered",
     "true",

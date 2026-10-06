@@ -9,7 +9,7 @@ const directory = await mkdtemp(path.join(os.tmpdir(), "folio-browser-"));
 const salt = Buffer.alloc(16, 3);
 const service = createApp(new MemoryStore(), {
   dataDir: directory,
-  maxBytes: 50 * 1024 * 1024,
+  maxBytes: 0,
   maxPages: 500,
   ttlMs: 86400000,
   conversionTimeout: 120000,

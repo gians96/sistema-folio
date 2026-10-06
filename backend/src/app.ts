@@ -17,18 +17,20 @@ import {
   writeFile,
   rm,
   readdir,
+  rename,
   stat,
 } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { configSchema, defaultConfig, type JobView } from "@folio/shared";
-import { inspectPdf, renderPdf } from "./pdf.js";
+import { appendPdf, inspectPdf, renderPdf } from "./pdf.js";
 import { convertWord } from "./convert.js";
 import type { Store, Job } from "./store.js";
 import { installAuth, type AuthSettings } from "./auth.js";
 
 export type Settings = {
   dataDir: string;
+  /** 0 = sin límite de tamaño. */
   maxBytes: number;
   maxPages: number;
   ttlMs: number;
@@ -106,18 +108,13 @@ export function createApp(
   }
   const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: settings.maxBytes, files: 1, fields: 0 },
+    limits: {
+      ...(settings.maxBytes > 0 && { fileSize: settings.maxBytes }),
+      files: 1,
+      fields: 0,
+    },
   });
-  app.get("/api/health", (_req, res) => res.json({ ok: true }));
-  app.get("/api/limits", (_req, res) =>
-    res.json({
-      maxBytes: settings.maxBytes,
-      maxPages: settings.maxPages,
-      ttlHours: settings.ttlMs / 3600000,
-    }),
-  );
-  app.post("/api/jobs", upload.single("file"), async (req, res) => {
-    const file = req.file;
+  function fileKind(file: Express.Multer.File | undefined) {
     if (!file) throw new HttpError(400, "Selecciona un archivo.");
     const kind = path.extname(file.originalname).slice(1).toLowerCase();
     if (!["pdf", "doc", "docx"].includes(kind))
@@ -135,6 +132,18 @@ export function createApp(
         400,
         "El contenido del archivo no coincide con su extensión.",
       );
+    return { file, kind: kind as Job["kind"] };
+  }
+  app.get("/api/health", (_req, res) => res.json({ ok: true }));
+  app.get("/api/limits", (_req, res) =>
+    res.json({
+      maxBytes: settings.maxBytes,
+      maxPages: settings.maxPages,
+      ttlHours: settings.ttlMs / 3600000,
+    }),
+  );
+  app.post("/api/jobs", upload.single("file"), async (req, res) => {
+    const { file, kind } = fileKind(req.file);
     const id = randomUUID(),
       token = randomBytes(32).toString("hex");
     const job: Job = {
@@ -143,7 +152,7 @@ export function createApp(
       name: Buffer.from(file.originalname, "latin1")
         .toString("utf8")
         .slice(0, 240),
-      kind: kind as Job["kind"],
+      kind,
       status: "processing",
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + settings.ttlMs).toISOString(),
@@ -212,6 +221,79 @@ export function createApp(
       throw new HttpError(409, "El documento todavía no está disponible.");
     res.type("pdf").send(await readFile(path.join(dir(job.id), "source.pdf")));
   });
+  app.post("/api/jobs/:id/files", upload.single("file"), async (req, res) => {
+    const auth = await authorized(req);
+    const { file, kind } = fileKind(req.file);
+    const revision = z.coerce.number().int().parse(req.query.revision);
+    const position =
+      req.query.position === undefined
+        ? undefined
+        : z.coerce.number().int().min(0).parse(req.query.position);
+    const append = () =>
+      exclusive(auth.id, async () => {
+        const job = (await store.get(auth.id))!;
+        if (!job.config)
+          throw new HttpError(409, "Espera a que termine el procesamiento.");
+        if (job.revision !== revision)
+          throw new HttpError(409, "La edición cambió. Recarga el documento.");
+        const input = path.join(dir(job.id), `extra-${randomUUID()}.${kind}`);
+        let merged: Awaited<ReturnType<typeof appendPdf>>;
+        try {
+          await writeFile(input, file.buffer);
+          const bytes =
+            kind === "pdf"
+              ? file.buffer
+              : await converter(
+                  input,
+                  dir(job.id),
+                  settings.conversionTimeout,
+                  settings.soffice,
+                );
+          merged = await appendPdf(
+            await readFile(path.join(dir(job.id), "source.pdf")),
+            bytes,
+            settings.maxPages,
+          );
+        } catch (error) {
+          throw new HttpError(
+            422,
+            error instanceof Error
+              ? error.message
+              : "No se pudo añadir el archivo.",
+          );
+        } finally {
+          await rm(input, { force: true });
+        }
+        const staged = path.join(dir(job.id), "source.next.pdf");
+        await writeFile(staged, merged.bytes);
+        await rename(staged, path.join(dir(job.id), "source.pdf"));
+        const current = job.config.pages,
+          at = Math.min(position ?? current.length, current.length);
+        const patch = {
+          pages: [...job.pages, ...merged.pages],
+          config: {
+            ...job.config,
+            pages: [
+              ...current.slice(0, at),
+              ...defaultConfig(merged.pages).pages,
+              ...current.slice(at),
+            ],
+          },
+          revision: job.revision + 1,
+          renderedRevision: null,
+          status: "ready" as const,
+          error: null,
+        };
+        await store.update(job.id, patch);
+        return view({ ...job, ...patch });
+      });
+    if (kind === "pdf") res.json(await append());
+    else {
+      const task = conversionQueue.then(append, append);
+      conversionQueue = task.catch(() => {});
+      res.json(await task);
+    }
+  });
   app.put("/api/jobs/:id/config", async (req, res) => {
     const auth = await authorized(req);
     await exclusive(auth.id, async () => {
@@ -224,10 +306,8 @@ export function createApp(
         throw new HttpError(409, "La edición cambió. Recarga el documento.");
       if (!job.config)
         throw new HttpError(409, "Espera a que termine el procesamiento.");
-      if (
-        body.config.pages.length !== job.pages.length ||
-        body.config.pages.some((p) => job.pages[p.sourceIndex]?.id !== p.id)
-      )
+      // Se admite un subconjunto: las páginas eliminadas no aparecen en la configuración.
+      if (body.config.pages.some((p) => job.pages[p.sourceIndex]?.id !== p.id))
         throw new HttpError(
           400,
           "La configuración no corresponde a las páginas originales.",

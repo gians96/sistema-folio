@@ -16,7 +16,15 @@ export function usePdf(bytes: ArrayBuffer | null) {
     setError("");
     if (!bytes) return;
     let active = true;
-    const task = getDocument({ data: bytes.slice(0) });
+    const task = getDocument({
+      data: bytes.slice(0),
+      // Recursos servidos en /pdfjs/ (ver vite.config.ts): sin ellos los escaneos
+      // con JBIG2/CCITT o JPEG 2000 se muestran en blanco.
+      wasmUrl: "/pdfjs/wasm/",
+      standardFontDataUrl: "/pdfjs/standard_fonts/",
+      cMapUrl: "/pdfjs/cmaps/",
+      cMapPacked: true,
+    });
     task.promise
       .then((d) => {
         if (active) setDoc(d);
@@ -37,7 +45,9 @@ export function PdfPage({
   doc,
   index,
   rotation = 0,
-  width,
+  width = 595,
+  fit,
+  zoom = 1,
   edit,
   config,
   label,
@@ -46,7 +56,10 @@ export function PdfPage({
   doc: PDFDocumentProxy;
   index: number;
   rotation?: number;
-  width: number;
+  width?: number;
+  /** Área disponible: la página se ajusta completa dentro y luego se aplica zoom. */
+  fit?: { width: number; height: number };
+  zoom?: number;
   edit?: PageEdit;
   config?: FolioConfig;
   label?: string;
@@ -58,6 +71,12 @@ export function PdfPage({
   const [geometry, setGeometry] = useState({ width: 595, height: 842 });
   const [failed, setFailed] = useState(false);
   const [rendered, setRendered] = useState(false);
+  const fitWidth = fit?.width,
+    fitHeight = fit?.height;
+  const sizeFor = (w: number, h: number) =>
+    fitWidth && fitHeight
+      ? Math.max(40, Math.floor(Math.min(fitWidth, (fitHeight * w) / h) * zoom))
+      : width;
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -89,7 +108,7 @@ export function PdfPage({
           rotation: (page.rotate + rotation) % 360,
         });
         setGeometry({ width: viewport.width, height: viewport.height });
-        const scale = width / viewport.width;
+        const scale = sizeFor(viewport.width, viewport.height) / viewport.width;
         const ratio = window.devicePixelRatio || 1;
         const target = canvas.current;
         target.width = Math.floor(viewport.width * scale * ratio);
@@ -119,15 +138,16 @@ export function PdfPage({
       stopped = true;
       rendering?.cancel();
     };
-  }, [doc, index, rotation, width, visible, onReady]);
-  const scale = width / geometry.width;
+  }, [doc, index, rotation, width, fitWidth, fitHeight, zoom, visible, onReady]);
+  const shownWidth = sizeFor(geometry.width, geometry.height);
+  const scale = shownWidth / geometry.width;
   const position = edit?.position ?? config?.position;
   return (
     <div
       ref={host}
       className="pdf-page"
       data-rendered={rendered}
-      style={{ width, height: geometry.height * scale }}
+      style={{ width: shownWidth, height: geometry.height * scale }}
     >
       <canvas ref={canvas} style={{ width: "100%", height: "100%" }} />
       {failed && (

@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type DragEvent,
+  type FormEvent,
+  type WheelEvent,
+} from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -7,11 +15,19 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  Eye,
+  EyeOff,
   FileCheck2,
+  FilePlus2,
   FileText,
   Layers,
   LogOut,
   LoaderCircle,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  RotateCcw,
   RotateCw,
   ShieldCheck,
   SlidersHorizontal,
@@ -92,6 +108,37 @@ function PositionControls({
     </>
   );
 }
+const countIncluded = (config: FolioConfig) =>
+  config.pages.filter((p) => p.included).length;
+/**
+ * En orden descendente, si la secuencia terminaba en 1 (inicio = páginas incluidas),
+ * el número inicial acompaña los cambios de páginas para seguir terminando en 1.
+ */
+function followCount(prev: FolioConfig | null, next: FolioConfig): FolioConfig {
+  if (
+    prev &&
+    prev.direction === "desc" &&
+    next.direction === "desc" &&
+    next.start === prev.start &&
+    prev.start === countIncluded(prev)
+  )
+    return { ...next, start: countIncluded(next) };
+  return next;
+}
+function storedFlag(key: string) {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+function storeFlag(key: string, value: boolean) {
+  try {
+    localStorage.setItem(key, value ? "1" : "0");
+  } catch {
+    // Preferencia opcional: sin almacenamiento solo dura la sesión.
+  }
+}
 function initialSession(): Session | null {
   try {
     return JSON.parse(sessionStorage.getItem("folio-session") ?? "null");
@@ -109,17 +156,56 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
   const [mode, setMode] = useState<"edit" | "review">("edit");
   const [reviewIndex, setReviewIndex] = useState(0);
   const [reviewReady, setReviewReady] = useState(false);
-  const [zoom, setZoom] = useState(80);
+  // 100 % = la página completa ajustada al área visible.
+  const [zoom, setZoom] = useState(100);
+  const canvasArea = useRef<HTMLDivElement>(null);
+  const [area, setArea] = useState({ width: 480, height: 640 });
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [dirty, setDirty] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [dropping, setDropping] = useState(false);
+  const [hidePages, setHidePages] = useState(() =>
+    storedFlag("folio-hide-pages"),
+  );
+  const [hideSettings, setHideSettings] = useState(() =>
+    storedFlag("folio-hide-settings"),
+  );
+  // Páginas que se están arrastrando (una o varias).
+  const [dragPage, setDragPage] = useState<string[] | null>(null);
+  // Selección múltiple (Shift = rango, Ctrl = alternar); "selected" es la página activa.
+  const [picked, setPicked] = useState<string[]>([]);
+  const anchor = useRef("");
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(
+    null,
+  );
+  const [toast, setToast] = useState<{
+    id: number;
+    message: string;
+    action?: { label: string; run: () => void };
+  } | null>(null);
+  const latestConfig = useRef(config);
+  latestConfig.current = config;
+  // Navegación con la rueda: bloqueo por gesto y "armado" al llegar al borde.
+  const wheel = useRef({
+    lockUntil: 0,
+    armed: false,
+    acc: 0,
+    scrollTo: "" as "" | "top" | "bottom",
+  });
   const [limits, setLimits] = useState({
-    maxBytes: 50 * 1024 * 1024,
+    maxBytes: 0,
     maxPages: 500,
     ttlHours: 24,
   });
   const fileInput = useRef<HTMLInputElement>(null);
+  const addInput = useRef<HTMLInputElement>(null);
+  const thumbnailList = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const documentBar = useRef<HTMLDivElement>(null);
+  const positioned = useRef("");
+  const queued = useRef<File[]>([]);
   const sourcePdf = usePdf(source),
     reviewPdf = usePdf(review);
   useEffect(() => {
@@ -175,17 +261,23 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
   }, [dirty]);
-  async function upload(file?: File) {
+  function invalidFile(file: File) {
+    if (!/\.(pdf|docx?)$/i.test(file.name))
+      return `${file.name}: selecciona un archivo PDF, DOC o DOCX.`;
+    if (limits.maxBytes > 0 && file.size > limits.maxBytes)
+      return `${file.name} supera ${limits.maxBytes / 1024 / 1024} MB.`;
+    return "";
+  }
+  async function upload(files: File[]) {
+    const [file, ...rest] = files;
     if (!file || busy) return;
     setError("");
-    if (!/\.(pdf|docx?)$/i.test(file.name)) {
-      setError("Selecciona un archivo PDF, DOC o DOCX.");
+    const invalid = files.map(invalidFile).find(Boolean);
+    if (invalid) {
+      setError(invalid);
       return;
     }
-    if (file.size > limits.maxBytes) {
-      setError(`El archivo supera ${limits.maxBytes / 1024 / 1024} MB.`);
-      return;
-    }
+    queued.current = rest;
     setBusy("Cargando documento…");
     try {
       const form = new FormData();
@@ -202,14 +294,79 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
       setMode("edit");
       setSession({ id: result.job.id, token: result.token });
     } catch (e) {
+      queued.current = [];
       setError((e as Error).message);
     } finally {
       setBusy("");
       if (fileInput.current) fileInput.current.value = "";
     }
   }
+  async function appendFiles(files: File[], position?: number) {
+    if (!session || !job || !config || busy || !files.length) return;
+    setError("");
+    const invalid = files.map(invalidFile).find(Boolean);
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
+    const before = position ?? config.pages.length;
+    let latest: JobView | null = null;
+    let total = job.pages.length,
+      at = position;
+    try {
+      setBusy("Guardando…");
+      let revision = job.revision;
+      if (dirty) revision = (await save())?.revision ?? revision;
+      for (const [i, file] of files.entries()) {
+        setBusy(
+          files.length > 1
+            ? `Añadiendo ${i + 1} de ${files.length}…`
+            : "Añadiendo documento…",
+        );
+        const form = new FormData();
+        form.append("file", file);
+        latest = await api<JobView>(
+          `/jobs/${session.id}/files?revision=${revision}${at === undefined ? "" : `&position=${at}`}`,
+          session,
+          { method: "POST", body: form },
+        );
+        revision = latest.revision;
+        // Los siguientes archivos se colocan después de las páginas recién añadidas.
+        if (at !== undefined) at += latest.pages.length - total;
+        total = latest.pages.length;
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      if (latest?.config) {
+        const adjusted = followCount(config, latest.config);
+        setJob(latest);
+        setConfig(adjusted);
+        // Si se ajustó el número inicial, queda pendiente de guardar.
+        setDirty(adjusted !== latest.config);
+        setReview(null);
+        setMode("edit");
+        setSelected(latest.config.pages[before]?.id ?? selected);
+        try {
+          setSource(
+            await api<ArrayBuffer>(`/jobs/${session.id}/source`, session),
+          );
+        } catch (e) {
+          setError((e as Error).message);
+        }
+      }
+      setBusy("");
+      if (addInput.current) addInput.current.value = "";
+    }
+  }
+  useEffect(() => {
+    if (!sourcePdf.doc || busy || !queued.current.length) return;
+    const files = queued.current;
+    queued.current = [];
+    void appendFiles(files);
+  }, [sourcePdf.doc, busy]);
   function change(next: FolioConfig) {
-    setConfig(next);
+    setConfig(followCount(latestConfig.current, next));
     setDirty(true);
     setReview(null);
     setMode("edit");
@@ -232,6 +389,114 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
     if (target < 0 || target >= pages.length) return;
     [pages[i], pages[target]] = [pages[target], pages[i]];
     change({ ...config, pages });
+  }
+  /** Páginas afectadas por una acción: la selección múltiple si incluye a id, si no solo id. */
+  function targets(id: string) {
+    if (!config || picked.length < 2 || !picked.includes(id)) return [id];
+    return config.pages.filter((p) => picked.includes(p.id)).map((p) => p.id);
+  }
+  function moveTo(ids: string[], index: number) {
+    if (!config) return;
+    const set = new Set(ids);
+    const moving = config.pages.filter((p) => set.has(p.id));
+    const rest = config.pages.filter((p) => !set.has(p.id));
+    const at =
+      index - config.pages.slice(0, index).filter((p) => set.has(p.id)).length;
+    rest.splice(at, 0, ...moving);
+    if (rest.every((p, i) => p.id === config.pages[i].id)) return;
+    change({ ...config, pages: rest });
+  }
+  function notify(
+    message: string,
+    action?: { label: string; run: () => void },
+  ) {
+    setToast({ id: Date.now(), message, action });
+  }
+  function toggleIncluded(ids: string[]) {
+    if (!config) return;
+    const set = new Set(ids);
+    // Todas quedan igual: se toma como referencia la primera afectada.
+    const include = !config.pages.find((p) => set.has(p.id))?.included;
+    change({
+      ...config,
+      pages: config.pages.map((p) =>
+        set.has(p.id) ? { ...p, included: include } : p,
+      ),
+    });
+  }
+  function deletePages(ids: string[]) {
+    if (!config) return;
+    const set = new Set(ids);
+    const removed = config.pages
+      .map((page, index) => ({ page, index }))
+      .filter((item) => set.has(item.page.id));
+    if (!removed.length) return;
+    if (removed.length >= config.pages.length) {
+      notify("El trabajo debe conservar al menos una página.");
+      return;
+    }
+    const pages = config.pages.filter((p) => !set.has(p.id));
+    change({ ...config, pages });
+    setPicked([]);
+    if (set.has(selected))
+      setSelected(pages[Math.min(removed[0].index, pages.length - 1)].id);
+    notify(
+      removed.length === 1
+        ? `Página ${removed[0].page.sourceIndex + 1} eliminada`
+        : `${removed.length} páginas eliminadas`,
+      {
+        label: "Deshacer",
+        run: () => {
+          const current = latestConfig.current;
+          if (!current) return;
+          const restored = [...current.pages];
+          for (const { page, index } of removed)
+            if (!restored.some((p) => p.id === page.id))
+              restored.splice(Math.min(index, restored.length), 0, page);
+          change({ ...current, pages: restored });
+          setSelected(removed[0].page.id);
+          if (removed.length > 1) setPicked(removed.map((r) => r.page.id));
+        },
+      },
+    );
+  }
+  function openMenu(e: { clientX: number; clientY: number }, id: string) {
+    if (!picked.includes(id)) setPicked([]);
+    setSelected(id);
+    setMenu({ x: e.clientX, y: e.clientY, id });
+  }
+  function rotate(ids: string[], delta: number) {
+    if (!config) return;
+    const set = new Set(ids);
+    change({
+      ...config,
+      pages: config.pages.map((p) =>
+        set.has(p.id)
+          ? {
+              ...p,
+              rotation: ((p.rotation + delta + 360) %
+                360) as PageEdit["rotation"],
+            }
+          : p,
+      ),
+    });
+  }
+  function pick(id: string, e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }) {
+    if (!config) return;
+    if (e.shiftKey) {
+      const from = config.pages.findIndex((p) => p.id === (anchor.current || selected)),
+        to = config.pages.findIndex((p) => p.id === id);
+      const [lo, hi] = from < 0 ? [to, to] : [Math.min(from, to), Math.max(from, to)];
+      setPicked(config.pages.slice(lo, hi + 1).map((p) => p.id));
+    } else if (e.ctrlKey || e.metaKey) {
+      const base = picked.length ? picked : selected ? [selected] : [];
+      setPicked(base.includes(id) ? base.filter((x) => x !== id) : [...base, id]);
+      anchor.current = id;
+    } else {
+      setPicked([]);
+      anchor.current = id;
+    }
+    setSelected(id);
   }
   async function save(): Promise<JobView | null> {
     if (!session || !job || !config) return null;
@@ -315,6 +580,8 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
     }
   }
   function reset() {
+    queued.current = [];
+    setPicked([]);
     setSession(null);
     setJob(null);
     setConfig(null);
@@ -330,6 +597,196 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
   const labels = config ? folios(config) : new Map<string, string>();
   const validation = config ? configSchema.safeParse(config) : null;
   const canDownload = !!review && !!reviewPdf.doc && reviewReady && !dirty;
+  useEffect(() => {
+    // Mantiene visible la miniatura seleccionada sin desplazar la ventana.
+    const list = thumbnailList.current,
+      item = list?.querySelector<HTMLElement>(".thumbnail.current");
+    if (!list || !item) return;
+    const top = item.offsetTop,
+      bottom = top + item.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top - 12;
+    else if (bottom > list.scrollTop + list.clientHeight)
+      list.scrollTop = bottom - list.clientHeight + 12;
+  }, [selected, pageIndex, reviewIndex, mode]);
+  async function saveNow() {
+    if (busy || !config) return;
+    if (!dirty) {
+      notify("No hay cambios por guardar");
+      return;
+    }
+    setBusy("Guardando…");
+    try {
+      await save();
+      notify("Cambios guardados");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }
+  function step(delta: number) {
+    if (!config) return;
+    if (mode === "review")
+      setReviewIndex(Math.min(Math.max(reviewIndex + delta, 0), included - 1));
+    else {
+      const next = config.pages[pageIndex + delta];
+      if (next) setSelected(next.id);
+    }
+  }
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void saveNow();
+        return;
+      }
+      if (e.key === "Escape") {
+        if (menu) setMenu(null);
+        else setPicked([]);
+        return;
+      }
+      const target = e.target as HTMLElement;
+      if (
+        e.ctrlKey ||
+        e.metaKey ||
+        e.altKey ||
+        busy ||
+        target.closest("input, select, textarea, [contenteditable]")
+      )
+        return;
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+        step(e.key === "ArrowLeft" ? -1 : 1);
+      }
+      if (e.key === "Delete" && mode === "edit" && selected && !menu) {
+        e.preventDefault();
+        deletePages(targets(selected));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), toast.action ? 6000 : 2200);
+    return () => clearTimeout(timer);
+  }, [toast]);
+  useLayoutEffect(() => {
+    // Cada hoja nueva empieza arriba, salvo que se llegue retrocediendo con la rueda.
+    const el = canvasArea.current;
+    const target = wheel.current.scrollTo;
+    wheel.current.scrollTo = "";
+    wheel.current.armed = false;
+    if (el) el.scrollTop = target === "bottom" ? el.scrollHeight : 0;
+  }, [selected, reviewIndex, mode]);
+  useEffect(() => {
+    // La rueda dentro del editor no debe arrastrar la página exterior al llegar al límite.
+    const el = editorRef.current;
+    if (!el) return;
+    const contain = (e: globalThis.WheelEvent) => {
+      if (e.ctrlKey || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      const box = (e.target as HTMLElement).closest<HTMLElement>(
+        ".canvas-area, .thumbnail-list, .settings-fields, .review-panel",
+      );
+      if (!box) return;
+      const atEdge =
+        e.deltaY > 0
+          ? box.scrollTop + box.clientHeight >= box.scrollHeight - 1
+          : box.scrollTop <= 0;
+      if (atEdge) e.preventDefault();
+    };
+    el.addEventListener("wheel", contain, { passive: false });
+    return () => el.removeEventListener("wheel", contain);
+  }, [!!config]);
+  useEffect(() => {
+    // Al abrir un documento, el área de trabajo queda ajustada a la ventana.
+    if (!session || !config) return;
+    if (positioned.current === session.id) return;
+    positioned.current = session.id;
+    documentBar.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [session, !!config]);
+  function onViewerWheel(e: WheelEvent<HTMLDivElement>) {
+    if (!config || e.ctrlKey || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    const el = e.currentTarget,
+      w = wheel.current,
+      now = Date.now(),
+      down = e.deltaY > 0;
+    const atEdge = down
+      ? el.scrollTop + el.clientHeight >= el.scrollHeight - 2
+      : el.scrollTop <= 1;
+    if (!atEdge) {
+      w.armed = false;
+      w.acc = 0;
+      return;
+    }
+    // Mientras dure el mismo gesto (inercia incluida) no se cambia otra vez.
+    if (now < w.lockUntil) {
+      w.lockUntil = now + 220;
+      return;
+    }
+    const overflow = el.scrollHeight > el.clientHeight + 2;
+    if (overflow && !w.armed) {
+      // Recién llegó al borde: hace falta otro gesto para pasar de hoja.
+      w.armed = true;
+      w.lockUntil = now + 220;
+      return;
+    }
+    w.acc += e.deltaY;
+    if (Math.abs(w.acc) < 40) return;
+    w.acc = 0;
+    w.armed = false;
+    w.lockUntil = now + 400;
+    const last = mode === "review" ? included - 1 : config.pages.length - 1;
+    const current = mode === "review" ? reviewIndex : pageIndex;
+    if (down ? current >= last : current <= 0) return;
+    w.scrollTo = down ? "top" : "bottom";
+    step(down ? 1 : -1);
+  }
+  function dropIndexAt(list: HTMLElement, y: number) {
+    const items = [...list.querySelectorAll<HTMLElement>(".thumbnail")];
+    const index = items.findIndex((item) => {
+      const box = item.getBoundingClientRect();
+      return y < box.top + box.height / 2;
+    });
+    return index < 0 ? items.length : index;
+  }
+  const menuPage = menu && config?.pages.find((p) => p.id === menu.id);
+  const shownPage =
+    mode === "review"
+      ? config?.pages.filter((p) => p.included)[reviewIndex]
+      : page;
+  const shownFolio = !shownPage
+    ? ""
+    : !shownPage.included
+      ? "Excluida"
+      : !shownPage.stamp
+        ? "Sin folio"
+        : (labels.get(shownPage.id) ?? "");
+  useEffect(() => {
+    const el = canvasArea.current;
+    if (!el) return;
+    // Se mide la caja exterior: no cambia cuando aparecen barras de desplazamiento.
+    const measure = () => {
+      const css = getComputedStyle(el);
+      const width =
+        el.offsetWidth -
+        parseFloat(css.paddingLeft) -
+        parseFloat(css.paddingRight);
+      const height =
+        el.offsetHeight -
+        parseFloat(css.paddingTop) -
+        parseFloat(css.paddingBottom);
+      setArea({
+        width: Math.max(120, Math.floor(width) - 4),
+        height: Math.max(120, Math.floor(height) - 4),
+      });
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [!!config]);
+  const hasFiles = (e: DragEvent) =>
+    e.dataTransfer.types.includes("Files");
   return (
     <div className="app">
       <header className="topbar">
@@ -396,9 +853,19 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
           ref={fileInput}
           type="file"
           accept=".pdf,.doc,.docx"
+          multiple
           className="sr-only"
           aria-label="Seleccionar documento"
-          onChange={(e) => void upload(e.target.files?.[0])}
+          onChange={(e) => void upload([...(e.target.files ?? [])])}
+        />
+        <input
+          ref={addInput}
+          type="file"
+          accept=".pdf,.doc,.docx"
+          multiple
+          className="sr-only"
+          aria-label="Añadir documentos"
+          onChange={(e) => void appendFiles([...(e.target.files ?? [])])}
         />
         {!session ? (
           <>
@@ -412,16 +879,17 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
               onDrop={(e) => {
                 e.preventDefault();
                 setDragging(false);
-                if (e.dataTransfer.files.length > 1)
-                  setError("Carga un solo documento por trabajo.");
-                else void upload(e.dataTransfer.files[0]);
+                void upload([...e.dataTransfer.files]);
               }}
             >
               <div className="upload-icon">
                 <UploadCloud size={34} />
               </div>
               <h2>Todo empieza con un documento</h2>
-              <p>Arrastra tu archivo aquí o selecciónalo desde tu equipo.</p>
+              <p>
+                Arrastra uno o varios archivos aquí o selecciónalos desde tu
+                equipo. Se unirán en el orden en que los sueltes.
+              </p>
               <button
                 className="primary"
                 disabled={!!busy}
@@ -439,8 +907,10 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                 <span>DOC</span>
                 <span>DOCX</span>
                 <i />
-                Hasta {limits.maxBytes / 1024 / 1024} MB · {limits.maxPages}{" "}
-                páginas
+                {limits.maxBytes > 0
+                  ? `Hasta ${limits.maxBytes / 1024 / 1024} MB · `
+                  : "Sin límite de tamaño · Hasta "}
+                {limits.maxPages} páginas
               </div>
             </section>
             <div className="benefits">
@@ -492,7 +962,7 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
           </section>
         ) : (
           <>
-            <div className="document-bar">
+            <div className="document-bar" ref={documentBar}>
               <div className="document-name">
                 <FileText size={24} />
                 <div>
@@ -523,18 +993,17 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                   Nuevo documento
                 </button>
                 <button
+                  className="text-button add-button"
+                  disabled={!!busy}
+                  onClick={() => addInput.current?.click()}
+                >
+                  <FilePlus2 size={15} /> Añadir documento
+                </button>
+                <button
                   className="text-button"
                   disabled={!!busy || !dirty}
-                  onClick={async () => {
-                    setBusy("Guardando…");
-                    try {
-                      await save();
-                    } catch (e) {
-                      setError((e as Error).message);
-                    } finally {
-                      setBusy("");
-                    }
-                  }}
+                  title="Guardar (Ctrl+S)"
+                  onClick={() => void saveNow()}
                 >
                   Guardar
                 </button>
@@ -547,38 +1016,227 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                 >
                   <Trash2 size={17} />
                 </button>
+                {mode === "edit" ? (
+                  <button
+                    className="primary compact"
+                    title="La revisión final confirma la ubicación exacta de los folios."
+                    disabled={!!busy || !validation?.success}
+                    onClick={() => void generate()}
+                  >
+                    {busy ? (
+                      <LoaderCircle size={17} className="spin" />
+                    ) : (
+                      <FileCheck2 size={17} />
+                    )}
+                    {busy || "Generar revisión final"}
+                    <ChevronRight size={15} />
+                  </button>
+                ) : (
+                  <button
+                    className="primary compact"
+                    title="La descarga será idéntica a esta revisión."
+                    disabled={!!busy || !canDownload}
+                    onClick={() => void download()}
+                  >
+                    <Download size={17} />
+                    {busy || "Descargar PDF"}
+                  </button>
+                )}
               </div>
             </div>
+            {validation && !validation.success && (
+              <div role="alert" className="alert">
+                {config.direction === "desc" &&
+                config.start - included + 1 < 0 ? (
+                  <>
+                    <span>
+                      Orden descendente con {included} páginas: empezando en{" "}
+                      {config.start}, las últimas tendrían folios negativos.
+                      Para terminar en 1, el número inicial debe ser {included}.
+                    </span>
+                    <button
+                      className="alert-action"
+                      onClick={() => change({ ...config, start: included })}
+                    >
+                      Usar {included}
+                    </button>
+                  </>
+                ) : (
+                  validation.error.issues.map((i) => i.message).join(" ")
+                )}
+              </div>
+            )}
             {job?.kind !== "pdf" && (
               <div className="notice">
                 Word convertido a PDF. Revisa la distribución y las fuentes
                 antes de continuar.
               </div>
             )}
-            <div className="editor">
+            <div
+              ref={editorRef}
+              className={`editor ${dropping ? "drop-files" : ""} ${hidePages ? "hide-pages" : ""} ${hideSettings ? "hide-settings" : ""}`}
+              onDragOver={(e) => {
+                if (!hasFiles(e) || busy) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+                setDropping(true);
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node))
+                  setDropping(false);
+              }}
+              onDrop={(e) => {
+                if (!hasFiles(e)) return;
+                e.preventDefault();
+                setDropping(false);
+                void appendFiles([...e.dataTransfer.files]);
+              }}
+            >
               <aside className="pages-panel">
                 <div className="panel-heading">
                   <h2>Páginas</h2>
-                  <span>
-                    {mode === "review" ? included : config.pages.length}
+                  <span title="Shift o Ctrl + clic para seleccionar varias">
+                    {mode === "review"
+                      ? included
+                      : picked.length > 1
+                        ? `${picked.length} sel.`
+                        : config.pages.length}
                   </span>
                 </div>
-                <div className="thumbnail-list">
+                <div
+                  className="thumbnail-list"
+                  ref={thumbnailList}
+                  onDragOver={(e) => {
+                    const files = !dragPage && hasFiles(e);
+                    if (mode !== "edit" || busy || (!dragPage && !files)) return;
+                    e.preventDefault();
+                    // Desplaza la lista al acercarse a los bordes mientras se arrastra.
+                    const box = e.currentTarget.getBoundingClientRect(),
+                      edge = Math.min(80, box.height / 4);
+                    if (e.clientY < box.top + edge)
+                      e.currentTarget.scrollTop -= Math.ceil(
+                        (box.top + edge - e.clientY) / 3,
+                      );
+                    else if (e.clientY > box.bottom - edge)
+                      e.currentTarget.scrollTop += Math.ceil(
+                        (e.clientY - (box.bottom - edge)) / 3,
+                      );
+                    if (files) {
+                      e.stopPropagation();
+                      e.dataTransfer.dropEffect = "copy";
+                      setDropping(false);
+                    }
+                    const index = dropIndexAt(e.currentTarget, e.clientY);
+                    if (index !== dropIndex) setDropIndex(index);
+                  }}
+                  onDragLeave={(e) => {
+                    if (!e.currentTarget.contains(e.relatedTarget as Node))
+                      setDropIndex(null);
+                  }}
+                  onDrop={(e) => {
+                    const index =
+                      dropIndex ?? dropIndexAt(e.currentTarget, e.clientY);
+                    if (dragPage) {
+                      e.preventDefault();
+                      moveTo(dragPage, index);
+                      setDragPage(null);
+                      setDropIndex(null);
+                    } else if (mode === "edit" && hasFiles(e)) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDropIndex(null);
+                      void appendFiles([...e.dataTransfer.files], index);
+                    }
+                  }}
+                >
                   {(mode === "review"
                     ? config.pages.filter((p) => p.included)
                     : config.pages
-                  ).map((p, i) => (
-                    <button
+                  ).map((p, i, list) => (
+                    <div
                       key={p.id}
-                      disabled={!!busy}
-                      className={`thumbnail ${mode === "review" ? (reviewIndex === i ? "current" : "") : selected === p.id ? "current" : ""} ${!p.included ? "excluded" : ""}`}
-                      onClick={() =>
-                        mode === "review"
-                          ? setReviewIndex(i)
-                          : setSelected(p.id)
+                      role="button"
+                      tabIndex={busy ? -1 : 0}
+                      aria-disabled={!!busy}
+                      draggable={mode === "edit" && !busy}
+                      title={
+                        mode === "edit"
+                          ? "Arrastra para reordenar · clic derecho para más opciones"
+                          : undefined
                       }
+                      className={`thumbnail ${mode === "review" ? (reviewIndex === i ? "current" : "") : selected === p.id ? "current" : ""} ${!p.included ? "excluded" : ""} ${picked.includes(p.id) && mode === "edit" ? "picked" : ""} ${dragPage?.includes(p.id) ? "dragged" : ""} ${dropIndex === i ? "drop-before" : ""} ${dropIndex === list.length && i === list.length - 1 ? "drop-after" : ""}`}
+                      onClick={(e) => {
+                        if (busy) return;
+                        if (mode === "review") setReviewIndex(i);
+                        else pick(p.id, e);
+                      }}
+                      onKeyDown={(e) => {
+                        if (busy || (e.key !== "Enter" && e.key !== " "))
+                          return;
+                        e.preventDefault();
+                        if (mode === "review") setReviewIndex(i);
+                        else setSelected(p.id);
+                      }}
+                      onDragStart={(e) => {
+                        const ids = targets(p.id);
+                        e.dataTransfer.effectAllowed = "move";
+                        e.dataTransfer.setData("text/plain", ids.join(","));
+                        if (ids.length > 1) {
+                          // Imagen de arrastre con el número de páginas.
+                          const ghost = document.createElement("div");
+                          ghost.className = "drag-ghost";
+                          ghost.textContent = `${ids.length} páginas`;
+                          document.body.append(ghost);
+                          e.dataTransfer.setDragImage(ghost, 16, 16);
+                          setTimeout(() => ghost.remove());
+                        } else {
+                          setPicked([]);
+                          anchor.current = p.id;
+                        }
+                        setDragPage(ids);
+                        setSelected(p.id);
+                      }}
+                      onContextMenu={(e) => {
+                        if (mode !== "edit" || busy) return;
+                        e.preventDefault();
+                        openMenu(e, p.id);
+                      }}
+                      onDragEnd={() => {
+                        setDragPage(null);
+                        setDropIndex(null);
+                      }}
                       aria-label={`Página original ${p.sourceIndex + 1}`}
                     >
+                      {mode === "edit" && (
+                        <div className="thumbnail-actions">
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            disabled={!!busy}
+                            aria-label={`Girar página ${p.sourceIndex + 1} a la izquierda`}
+                            title="Girar a la izquierda"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              rotate(targets(p.id), -90);
+                            }}
+                          >
+                            <RotateCcw size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            disabled={!!busy}
+                            aria-label={`Girar página ${p.sourceIndex + 1} a la derecha`}
+                            title="Girar a la derecha"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              rotate(targets(p.id), 90);
+                            }}
+                          >
+                            <RotateCw size={12} />
+                          </button>
+                        </div>
+                      )}
                       {sourcePdf.doc && (
                         <PdfPage
                           doc={sourcePdf.doc}
@@ -600,12 +1258,30 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                               : labels.get(p.id)}
                         </small>
                       </span>
-                    </button>
+                    </div>
                   ))}
                 </div>
               </aside>
               <section className="viewer">
                 <div className="viewer-toolbar">
+                  <button
+                    className="panel-toggle"
+                    title={hidePages ? "Mostrar páginas" : "Ocultar páginas"}
+                    aria-label={
+                      hidePages ? "Mostrar páginas" : "Ocultar páginas"
+                    }
+                    aria-pressed={hidePages}
+                    onClick={() => {
+                      setHidePages(!hidePages);
+                      storeFlag("folio-hide-pages", !hidePages);
+                    }}
+                  >
+                    {hidePages ? (
+                      <PanelLeftOpen size={16} />
+                    ) : (
+                      <PanelLeftClose size={16} />
+                    )}
+                  </button>
                   <span className="viewer-label">
                     {mode === "review" ? (
                       <>
@@ -621,26 +1297,69 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                     <button
                       aria-label="Reducir zoom"
                       onClick={() => setZoom(Math.max(30, zoom - 10))}
+                      disabled={zoom <= 30}
                     >
                       <ZoomOut size={16} />
                     </button>
-                    <span>{zoom}%</span>
+                    <button
+                      className="zoom-value"
+                      title="Ajustar la página a la ventana"
+                      aria-label={`Zoom ${zoom} %. Ajustar la página a la ventana`}
+                      onClick={() => setZoom(100)}
+                    >
+                      {zoom === 100 ? "Ajustada" : `${zoom}%`}
+                    </button>
                     <button
                       aria-label="Aumentar zoom"
-                      onClick={() => setZoom(Math.min(160, zoom + 10))}
+                      onClick={() => setZoom(Math.min(400, zoom + 10))}
+                      disabled={zoom >= 400}
                     >
                       <ZoomIn size={16} />
                     </button>
                   </div>
+                  <button
+                    className="panel-toggle"
+                    title={
+                      hideSettings
+                        ? "Mostrar configuración"
+                        : "Ocultar configuración"
+                    }
+                    aria-label={
+                      hideSettings
+                        ? "Mostrar configuración"
+                        : "Ocultar configuración"
+                    }
+                    aria-pressed={hideSettings}
+                    onClick={() => {
+                      setHideSettings(!hideSettings);
+                      storeFlag("folio-hide-settings", !hideSettings);
+                    }}
+                  >
+                    {hideSettings ? (
+                      <PanelRightOpen size={16} />
+                    ) : (
+                      <PanelRightClose size={16} />
+                    )}
+                  </button>
                 </div>
-                <div className="canvas-area">
+                <div
+                  className="canvas-area"
+                  ref={canvasArea}
+                  onWheel={onViewerWheel}
+                  onContextMenu={(e) => {
+                    if (mode !== "edit" || busy || !page) return;
+                    e.preventDefault();
+                    openMenu(e, page.id);
+                  }}
+                >
                   {mode === "review" ? (
                     reviewPdf.doc ? (
                       <PdfPage
                         key={`review-${reviewIndex}`}
                         doc={reviewPdf.doc}
                         index={reviewIndex}
-                        width={(595 * zoom) / 100}
+                        fit={area}
+                        zoom={zoom / 100}
                         onReady={setReviewReady}
                       />
                     ) : (
@@ -652,7 +1371,8 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                       doc={sourcePdf.doc}
                       index={page.sourceIndex}
                       rotation={page.rotation}
-                      width={(595 * zoom) / 100}
+                      fit={area}
+                      zoom={zoom / 100}
                       edit={page}
                       config={config}
                       label={labels.get(page.id)}
@@ -664,14 +1384,11 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                 <div className="viewer-footer">
                   <button
                     aria-label="Página anterior"
+                    title="Página anterior (←)"
                     disabled={
                       mode === "review" ? reviewIndex === 0 : pageIndex === 0
                     }
-                    onClick={() =>
-                      mode === "review"
-                        ? setReviewIndex(reviewIndex - 1)
-                        : setSelected(config.pages[pageIndex - 1].id)
-                    }
+                    onClick={() => step(-1)}
                   >
                     <ChevronLeft size={17} />
                   </button>
@@ -680,18 +1397,23 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                       ? `Página ${reviewIndex + 1} de ${included}`
                       : `Posición ${pageIndex + 1} de ${config.pages.length}`}
                   </span>
+                  {shownFolio && (
+                    <strong
+                      className={`current-folio ${shownPage?.included && shownPage.stamp ? "" : "muted"}`}
+                      aria-live="polite"
+                    >
+                      {shownFolio}
+                    </strong>
+                  )}
                   <button
                     aria-label="Página siguiente"
+                    title="Página siguiente (→)"
                     disabled={
                       mode === "review"
                         ? reviewIndex >= included - 1
                         : pageIndex >= config.pages.length - 1
                     }
-                    onClick={() =>
-                      mode === "review"
-                        ? setReviewIndex(reviewIndex + 1)
-                        : setSelected(config.pages[pageIndex + 1].id)
-                    }
+                    onClick={() => step(1)}
                   >
                     <ChevronRight size={17} />
                   </button>
@@ -738,6 +1460,101 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                   </div>
                 ) : (
                   <fieldset disabled={!!busy} className="settings-fields">
+                    {page && (
+                      <section className="page-settings">
+                        <h3>
+                          {picked.length > 1 && picked.includes(page.id)
+                            ? `${picked.length} páginas seleccionadas`
+                            : `Página original ${page.sourceIndex + 1}`}
+                        </h3>
+                        <div className="page-buttons">
+                          <button
+                            type="button"
+                            className="secondary"
+                            title="Girar a la izquierda"
+                            onClick={() => rotate(targets(page.id), -90)}
+                          >
+                            <RotateCcw size={15} /> Izquierda
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary"
+                            title="Girar a la derecha"
+                            onClick={() => rotate(targets(page.id), 90)}
+                          >
+                            <RotateCw size={15} /> Derecha
+                          </button>
+                          <button
+                            type="button"
+                            className="icon-button"
+                            aria-label="Mover página arriba"
+                            disabled={pageIndex === 0}
+                            onClick={() => move(-1)}
+                          >
+                            <ArrowUp size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            className="icon-button"
+                            aria-label="Mover página abajo"
+                            disabled={pageIndex === config.pages.length - 1}
+                            onClick={() => move(1)}
+                          >
+                            <ArrowDown size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            className="icon-button danger"
+                            aria-label="Eliminar página"
+                            title="Eliminar página (Supr)"
+                            onClick={() => deletePages(targets(page.id))}
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                        <label className="check-label">
+                          <input
+                            type="checkbox"
+                            checked={page.included}
+                            onChange={(e) =>
+                              patchPage({ included: e.target.checked })
+                            }
+                          />
+                          Incluir en el PDF final
+                        </label>
+                        <label className="check-label">
+                          <input
+                            type="checkbox"
+                            disabled={!page.included}
+                            checked={page.stamp}
+                            onChange={(e) =>
+                              patchPage({ stamp: e.target.checked })
+                            }
+                          />
+                          Mostrar folio
+                        </label>
+                        <label className="check-label">
+                          <input
+                            type="checkbox"
+                            checked={!!page.position}
+                            onChange={(e) =>
+                              patchPage({
+                                position: e.target.checked
+                                  ? { ...config.position }
+                                  : null,
+                              })
+                            }
+                          />
+                          Ubicación propia para esta página
+                        </label>
+                        {page.position && (
+                          <PositionControls
+                            value={page.position}
+                            onChange={(position) => patchPage({ position })}
+                          />
+                        )}
+                      </section>
+                    )}
                     <section>
                       <h3>Numeración</h3>
                       <div className="fields">
@@ -842,84 +1659,6 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                         </label>
                       </div>
                     </section>
-                    {page && (
-                      <section className="page-settings">
-                        <h3>Página original {page.sourceIndex + 1}</h3>
-                        <div className="page-buttons">
-                          <button
-                            type="button"
-                            className="secondary"
-                            onClick={() =>
-                              patchPage({
-                                rotation: ((page.rotation + 90) %
-                                  360) as PageEdit["rotation"],
-                              })
-                            }
-                          >
-                            <RotateCw size={15} /> Girar
-                          </button>
-                          <button
-                            type="button"
-                            className="icon-button"
-                            aria-label="Mover página arriba"
-                            disabled={pageIndex === 0}
-                            onClick={() => move(-1)}
-                          >
-                            <ArrowUp size={16} />
-                          </button>
-                          <button
-                            type="button"
-                            className="icon-button"
-                            aria-label="Mover página abajo"
-                            disabled={pageIndex === config.pages.length - 1}
-                            onClick={() => move(1)}
-                          >
-                            <ArrowDown size={16} />
-                          </button>
-                        </div>
-                        <label className="check-label">
-                          <input
-                            type="checkbox"
-                            checked={page.included}
-                            onChange={(e) =>
-                              patchPage({ included: e.target.checked })
-                            }
-                          />
-                          Incluir en el PDF final
-                        </label>
-                        <label className="check-label">
-                          <input
-                            type="checkbox"
-                            disabled={!page.included}
-                            checked={page.stamp}
-                            onChange={(e) =>
-                              patchPage({ stamp: e.target.checked })
-                            }
-                          />
-                          Mostrar folio
-                        </label>
-                        <label className="check-label">
-                          <input
-                            type="checkbox"
-                            checked={!!page.position}
-                            onChange={(e) =>
-                              patchPage({
-                                position: e.target.checked
-                                  ? { ...config.position }
-                                  : null,
-                              })
-                            }
-                          />
-                          Ubicación propia para esta página
-                        </label>
-                        {page.position && (
-                          <PositionControls
-                            value={page.position}
-                            onChange={(position) => patchPage({ position })}
-                          />
-                        )}
-                      </section>
-                    )}
                     <button
                       type="button"
                       className="text-button reset"
@@ -939,51 +1678,109 @@ function Workspace({ authEnabled, onLogout }: { authEnabled: boolean; onLogout: 
                 )}
               </aside>
             </div>
-            {validation && !validation.success && (
-              <div role="alert" className="alert">
-                {validation.error.issues.map((i) => i.message).join(" ")}
-              </div>
-            )}
-            <div className="bottom-bar">
-              <span>
-                <ShieldCheck size={17} />
-                {mode === "review"
-                  ? "La descarga será idéntica a esta revisión."
-                  : "La revisión final confirma la ubicación exacta de los folios."}
-              </span>
-              <div>
-                {mode === "edit" ? (
-                  <button
-                    className="primary"
-                    disabled={!!busy || !validation?.success}
-                    onClick={() => void generate()}
-                  >
-                    {busy ? (
-                      <LoaderCircle size={18} className="spin" />
-                    ) : (
-                      <FileCheck2 size={18} />
-                    )}{" "}
-                    {busy || "Generar revisión final"}{" "}
-                    <ChevronRight size={16} />
-                  </button>
-                ) : (
-                  <button
-                    className="primary"
-                    disabled={!!busy || !canDownload}
-                    onClick={() => void download()}
-                  >
-                    <Download size={18} />
-                    {busy || "Descargar PDF"}
-                  </button>
-                )}
-              </div>
-            </div>
           </>
         )}
-        <footer>
-          <span>Folio · Documentos en orden</span>
-          <span>PDF de salida · Original sin modificaciones</span>
-        </footer>
+        {menu && menuPage && (
+          <div
+            className="context-backdrop"
+            onMouseDown={() => setMenu(null)}
+            onWheel={() => setMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMenu(null);
+            }}
+          >
+            <div
+              className="context-menu"
+              role="menu"
+              aria-label={`Opciones de la página ${menuPage.sourceIndex + 1}`}
+              style={{
+                left: Math.min(menu.x, window.innerWidth - 230),
+                top: Math.min(menu.y, window.innerHeight - 210),
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <div className="context-title">
+                {targets(menuPage.id).length > 1
+                  ? `${targets(menuPage.id).length} páginas seleccionadas`
+                  : `Página original ${menuPage.sourceIndex + 1}`}
+              </div>
+              <button
+                role="menuitem"
+                autoFocus
+                onClick={() => {
+                  rotate(targets(menuPage.id), -90);
+                  setMenu(null);
+                }}
+              >
+                <RotateCcw size={15} /> Girar a la izquierda
+              </button>
+              <button
+                role="menuitem"
+                onClick={() => {
+                  rotate(targets(menuPage.id), 90);
+                  setMenu(null);
+                }}
+              >
+                <RotateCw size={15} /> Girar a la derecha
+              </button>
+              <button
+                role="menuitem"
+                onClick={() => {
+                  toggleIncluded(targets(menuPage.id));
+                  setMenu(null);
+                }}
+              >
+                {menuPage.included ? (
+                  <>
+                    <EyeOff size={15} /> Excluir del PDF final
+                  </>
+                ) : (
+                  <>
+                    <Eye size={15} /> Incluir en el PDF final
+                  </>
+                )}
+              </button>
+              <hr />
+              <button
+                role="menuitem"
+                className="danger"
+                onClick={() => {
+                  deletePages(targets(menuPage.id));
+                  setMenu(null);
+                }}
+              >
+                <Trash2 size={15} />
+                {targets(menuPage.id).length > 1
+                  ? "Eliminar páginas"
+                  : "Eliminar página"}{" "}
+                <kbd>Supr</kbd>
+              </button>
+            </div>
+          </div>
+        )}
+        {toast && (
+          <div className="toast" role="status" key={toast.id}>
+            {!toast.action && <CheckCircle2 size={17} />}
+            <span>{toast.message}</span>
+            {toast.action && (
+              <button
+                onClick={() => {
+                  toast.action?.run();
+                  setToast(null);
+                }}
+              >
+                {toast.action.label}
+              </button>
+            )}
+          </div>
+        )}
+        {!session && (
+          <footer>
+            <span>Folio · Documentos en orden</span>
+            <span>PDF de salida · Original sin modificaciones</span>
+          </footer>
+        )}
       </main>
     </div>
   );

@@ -34,9 +34,9 @@ No guardes la contraseña de `root` en el repositorio. `backend/.env` está excl
 
 ## Uso
 
-Carga un documento, organiza las páginas, gira o excluye las que necesites y configura la foliación. Puedes elegir cualquiera de las cuatro esquinas, márgenes, color, tamaño, prefijo, dígitos y número inicial. También puedes definir una posición diferente por página. Las páginas conservadas sin folio consumen número; las excluidas no. La revisión final genera el PDF real y la descarga entrega exactamente ese archivo. Una nueva edición invalida la revisión anterior.
+Carga uno o varios documentos, organiza las páginas arrastrando sus miniaturas, gíralas a la izquierda o a la derecha, excluye las que no necesites y configura la foliación. Para añadir más páginas a un trabajo abierto, arrastra otros PDF, DOC o DOCX sobre el editor o usa **Añadir documento**; sus páginas se agregan al final y conservan la edición previa. Puedes elegir cualquiera de las cuatro esquinas, márgenes, color, tamaño, prefijo, dígitos y número inicial. También puedes definir una posición diferente por página. Las páginas conservadas sin folio consumen número; las excluidas no. La revisión final genera el PDF real y la descarga entrega exactamente ese archivo. Una nueva edición invalida la revisión anterior.
 
-Límites iniciales: 50 MB y 500 páginas. Un DOC o DOCX puede cambiar de distribución al convertirse con LibreOffice; revísalo antes de descargar. La aplicación no edita el texto original ni realiza OCR.
+Límites iniciales: sin límite de tamaño y 500 páginas. Un DOC o DOCX puede cambiar de distribución al convertirse con LibreOffice; revísalo antes de descargar. La aplicación no edita el texto original ni realiza OCR.
 
 ## Estructura y comandos
 
@@ -61,7 +61,7 @@ Para instalar el navegador de Playwright la primera vez: `pnpm exec playwright i
 
 ## Configuración
 
-`backend/.env` admite `DATABASE_URL`, `PORT` (3001), `DATA_DIR` (`./data` dentro de backend), `SOFFICE_PATH`, `MAX_FILE_MB` (50), `MAX_PAGES` (500), `JOB_TTL_HOURS` (24) y `CONVERSION_TIMEOUT_MS` (120000). Vite atiende en 5173 y envía `/api` a `http://localhost:3001`; puedes cambiar el destino con `API_PROXY`. Si el puerto 5173 está ocupado, Vite avisará en lugar de cambiar de puerto silenciosamente.
+`backend/.env` admite `DATABASE_URL`, `PORT` (3001), `DATA_DIR` (`./data` dentro de backend), `SOFFICE_PATH`, `MAX_FILE_MB` (0 = sin límite), `MAX_PAGES` (500), `JOB_TTL_HOURS` (24) y `CONVERSION_TIMEOUT_MS` (120000). Vite atiende en 5173 y envía `/api` a `http://localhost:3001`; puedes cambiar el destino con `API_PROXY`. Si el puerto 5173 está ocupado, Vite avisará en lugar de cambiar de puerto silenciosamente.
 
 La API crea un trabajo con `POST /api/jobs` (`multipart/form-data`, campo `file`) y devuelve un token temporal. Las rutas `/api/jobs/:id` requieren `Authorization: Bearer <token>`. Incluyen lectura, PDF base, guardado de configuración, generación de revisión, vista previa, descarga y eliminación. MySQL guarda metadatos y configuración; los documentos quedan en disco. La aplicación usa una sola instancia de backend para su cola de conversiones y bloqueos.
 
@@ -83,7 +83,7 @@ El desarrollo local sigue usando Laragon. Para producción usa `compose.prod.yam
    SESSION_SECRET=<tercer-hexadecimal-aleatorio>
    ```
 
-   Dokploy usa estas variables para interpolar `compose.prod.yaml`; no es necesario subir un `.env`. Los parámetros opcionales `MAX_FILE_MB`, `MAX_PAGES`, `JOB_TTL_HOURS` y `CONVERSION_TIMEOUT_MS` conservan los valores locales si se omiten. Mantén `MAX_FILE_MB` en 50 o menos salvo que ajustes también `client_max_body_size` en `frontend/nginx.conf`.
+   Dokploy usa estas variables para interpolar `compose.prod.yaml`; no es necesario subir un `.env`. Los parámetros opcionales `MAX_FILE_MB`, `MAX_PAGES`, `JOB_TTL_HOURS` y `CONVERSION_TIMEOUT_MS` conservan los valores locales si se omiten. `MAX_FILE_MB` es 0 (sin límite) por defecto y `client_max_body_size` en `frontend/nginx.conf` está en 0; si defines un límite, ajústalo también allí.
 4. En **Domains** agrega el dominio que ya apunta a Contabo, selecciona solo el servicio `frontend`, puerto interno **8080** y habilita HTTPS. Revisa **Preview Compose**: debe publicar únicamente el frontend, sin puertos de host para backend o MySQL. Haz el primer despliegue manual y espera a que MySQL, backend y frontend indiquen estado saludable. La migración Prisma se aplica al iniciar el backend.
 5. Abre `https://tu-dominio`, inicia sesión y comprueba la carga, revisión y descarga de un PDF y un Word. Reinicia los servicios y confirma que un trabajo aún vigente se recupera. Configura respaldos de los volúmenes `mysql_data` y `document_data` con el mismo horario; los trabajos caducan a las 24 horas. Activa el despliegue automático de GitHub solo después de esta verificación.
 

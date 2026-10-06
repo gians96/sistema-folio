@@ -37,6 +37,25 @@ export async function inspectPdf(
   });
 }
 
+export async function appendPdf(
+  base: Uint8Array,
+  extra: Uint8Array,
+  maxPages: number,
+): Promise<{ bytes: Uint8Array; pages: PageInfo[] }> {
+  const pages = await inspectPdf(extra, maxPages);
+  const doc = await PDFDocument.load(base);
+  const offset = doc.getPageCount();
+  if (offset + pages.length > maxPages)
+    throw new Error(`El trabajo no puede superar ${maxPages} páginas.`);
+  const other = await PDFDocument.load(extra);
+  for (const page of await doc.copyPages(other, other.getPageIndices()))
+    doc.addPage(page);
+  return {
+    bytes: await doc.save(),
+    pages: pages.map((p) => ({ ...p, sourceIndex: p.sourceIndex + offset })),
+  };
+}
+
 export function placement(
   width: number,
   height: number,

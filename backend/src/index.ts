@@ -31,7 +31,7 @@ const db = new PrismaClient();
 await db.$connect();
 const service = createApp(prismaStore(db), {
   dataDir: process.env.DATA_DIR ?? "./data",
-  maxBytes: Number(process.env.MAX_FILE_MB ?? 50) * 1024 * 1024,
+  maxBytes: Number(process.env.MAX_FILE_MB ?? 0) * 1024 * 1024,
   maxPages: Number(process.env.MAX_PAGES ?? 500),
   ttlMs: Number(process.env.JOB_TTL_HOURS ?? 24) * 3600000,
   conversionTimeout: Number(process.env.CONVERSION_TIMEOUT_MS ?? 120000),
