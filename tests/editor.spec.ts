@@ -24,9 +24,9 @@ test("entrar, cargar, editar, revisar, descargar y retomar un trabajo guardado",
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Acceso" })).toBeVisible();
   await page.getByRole("button", { name: "Acceder con Google" }).click();
-  await expect(page.getByRole("heading", { name: "Tus documentos guardados" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Hola, Owner" })).toBeVisible();
   await expect(page.getByText("Aún no tienes trabajos")).toBeVisible();
-  await page.getByRole("link", { name: "Nuevo trabajo" }).click();
+  await page.getByRole("main").getByRole("link", { name: "Nuevo trabajo" }).click();
   await expect(page.getByRole("heading", { name: "Foliar documentos" })).toBeVisible();
   await page.screenshot({ path: "test-results/inicio.png", fullPage: true });
   await page
@@ -99,13 +99,25 @@ test("entrar, cargar, editar, revisar, descargar y retomar un trabajo guardado",
   await page.getByLabel("Nombre del trabajo").fill("CAS 003");
   await page.getByLabel("Nombre del trabajo").press("Enter");
   await expect(page.getByRole("button", { name: "CAS 003" })).toBeVisible();
-  await page.getByRole("link", { name: "Mis trabajos", exact: true }).click();
+  await expect(page.getByRole("navigation", { name: "Ruta" })).toContainText("CAS 003");
+  await page.screenshot({ path: "test-results/editor-menu-plegado.png" });
+  await page
+    .getByRole("navigation", { name: "Principal" })
+    .getByRole("link", { name: "Mis trabajos" })
+    .click();
   const card = page.locator(".job-card", { hasText: "CAS 003" });
   await expect(card.getByText("3 páginas · 3 en el PDF")).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Recientes" }).getByRole("link", { name: "CAS 003" }),
+  ).toBeVisible();
   await page.screenshot({ path: "test-results/mis-trabajos.png", fullPage: true });
   await card.getByRole("link", { name: "Abrir" }).click();
   await expect(page.getByLabel("Número inicial", { exact: true })).toHaveValue("20");
   await expect(page.getByLabel("Prefijo", { exact: true })).toHaveValue("F-");
+  // Volver por la ruta y retomar desde Recientes.
+  await page.getByRole("navigation", { name: "Ruta" }).getByRole("link", { name: "Mis trabajos" }).click();
+  await page.getByRole("region", { name: "Recientes" }).getByRole("link", { name: "CAS 003" }).click();
+  await expect(page.getByLabel("Número inicial", { exact: true })).toHaveValue("20");
   await page.getByRole("link", { name: "Administración" }).click();
   await expect(
     page.getByRole("row", { name: /owner@gmail\.com/ }).getByText("Propietario"),

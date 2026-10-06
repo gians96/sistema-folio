@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { FilePlus2, FileText, LoaderCircle, Trash2, X } from "lucide-react";
-import type { JobSummary, JobView } from "@folio/shared";
+import { useState } from "react";
+import { FilePlus2, FileText, LoaderCircle, Search, Trash2, X } from "lucide-react";
+import type { JobSummary, JobView, UserView } from "@folio/shared";
 import { api } from "./api";
 import { EditableTitle } from "./EditableTitle";
 
@@ -13,25 +13,45 @@ export const statusLabels: Record<JobSummary["status"], string> = {
 };
 export const formatDate = (iso: string) =>
   new Date(iso).toLocaleString("es", { dateStyle: "medium", timeStyle: "short" });
+const relative = new Intl.RelativeTimeFormat("es", { numeric: "auto" });
+const units: [Intl.RelativeTimeFormatUnit, number][] = [
+  ["year", 31536000],
+  ["month", 2592000],
+  ["week", 604800],
+  ["day", 86400],
+  ["hour", 3600],
+  ["minute", 60],
+];
+/** "hace 5 minutos", "ayer"… */
+export function timeAgo(iso: string) {
+  const seconds = (Date.parse(iso) - Date.now()) / 1000;
+  for (const [unit, size] of units)
+    if (Math.abs(seconds) >= size) return relative.format(Math.round(seconds / size), unit);
+  return "hace un momento";
+}
 
-export function Dashboard() {
-  const [jobs, setJobs] = useState<JobSummary[] | null>(null);
+export function Dashboard({
+  user,
+  jobs,
+  error: loadError,
+  onChanged,
+}: {
+  user: UserView;
+  jobs: JobSummary[] | null;
+  error: string;
+  /** Vuelve a cargar la lista tras renombrar o eliminar. */
+  onChanged: () => void;
+}) {
   const [error, setError] = useState("");
-  useEffect(() => {
-    api<JobSummary[]>("/jobs")
-      .then(setJobs)
-      .catch((reason) => setError((reason as Error).message));
-  }, []);
+  const [query, setQuery] = useState("");
   async function rename(id: string, title: string) {
     setError("");
     try {
-      const updated = await api<JobView>(`/jobs/${id}`, {
+      await api<JobView>(`/jobs/${id}`, {
         method: "PATCH",
         body: JSON.stringify({ title }),
       });
-      setJobs((list) =>
-        list && list.map((job) => (job.id === id ? { ...job, title: updated.title } : job)),
-      );
+      onChanged();
     } catch (reason) {
       setError((reason as Error).message);
     }
@@ -42,33 +62,60 @@ export function Dashboard() {
     setError("");
     try {
       await api(`/jobs/${job.id}`, { method: "DELETE" });
-      setJobs((list) => list && list.filter((item) => item.id !== job.id));
+      onChanged();
     } catch (reason) {
       setError((reason as Error).message);
     }
   }
+  const words = query.trim().toLowerCase();
+  const shown =
+    jobs?.filter((job) => !words || `${job.title} ${job.name}`.toLowerCase().includes(words)) ??
+    [];
+  const message = error || (!jobs && loadError);
   return (
     <main>
       <div className="heading">
         <div>
           <div className="eyebrow">MIS TRABAJOS</div>
-          <h1>Tus documentos guardados</h1>
-          <p>Cada trabajo conserva sus páginas y su foliación para que lo retomes cuando quieras.</p>
+          <h1>Hola, {user.name.trim().split(/\s+/)[0]}</h1>
+          <p>
+            {!jobs
+              ? "Cargando tus trabajos…"
+              : jobs.length
+                ? `Tienes ${jobs.length} ${jobs.length === 1 ? "trabajo guardado" : "trabajos guardados"}. Retoma uno o crea uno nuevo.`
+                : "Crea tu primer trabajo para empezar."}
+          </p>
         </div>
-        <a className="primary" href="#/nuevo">
-          <FilePlus2 size={17} /> Nuevo trabajo
-        </a>
+        <div className="heading-actions">
+          {!!jobs?.length && (
+            <label className="search">
+              <Search size={16} aria-hidden="true" />
+              <input
+                type="search"
+                placeholder="Buscar trabajo…"
+                aria-label="Buscar trabajo"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </label>
+          )}
+          <a className="primary" href="#/nuevo">
+            <FilePlus2 size={17} /> Nuevo trabajo
+          </a>
+        </div>
       </div>
-      {error && (
+      {message && (
         <div role="alert" className="alert">
-          <span>{error}</span>
-          <button aria-label="Cerrar aviso" onClick={() => setError("")}>
-            <X size={16} />
-          </button>
+          <span>{message}</span>
+          {error && (
+            <button aria-label="Cerrar aviso" onClick={() => setError("")}>
+              <X size={16} />
+            </button>
+          )}
         </div>
       )}
       {!jobs ? (
-        !error && (
+        !loadError && (
           <div className="loading-block">
             <LoaderCircle className="spin" size={26} />
           </div>
@@ -84,9 +131,11 @@ export function Dashboard() {
             <FilePlus2 size={18} /> Crear mi primer trabajo
           </a>
         </section>
+      ) : !shown.length ? (
+        <p className="empty-text">No hay trabajos que coincidan con "{query.trim()}".</p>
       ) : (
         <div className="job-grid">
-          {jobs.map((job) => (
+          {shown.map((job) => (
             <article className="job-card" key={job.id}>
               <div className="job-head">
                 <FileText size={22} />
@@ -103,7 +152,9 @@ export function Dashboard() {
                     : `${job.pages} páginas · ${job.included} en el PDF`}
                 </span>
               </div>
-              <small className="job-date">Actualizado el {formatDate(job.updatedAt)}</small>
+              <small className="job-date" title={formatDate(job.updatedAt)}>
+                Actualizado {timeAgo(job.updatedAt)}
+              </small>
               <div className="job-actions">
                 <a className="secondary" href={`#/trabajo/${job.id}`}>
                   Abrir

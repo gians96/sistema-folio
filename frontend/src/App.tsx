@@ -20,9 +20,8 @@ import {
   FileCheck2,
   FilePlus2,
   FileText,
-  Layers,
-  LogOut,
   LoaderCircle,
+  Menu,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -42,6 +41,7 @@ import {
   defaultConfig,
   folios,
   type FolioConfig,
+  type JobSummary,
   type JobView,
   type Limits,
   type PageEdit,
@@ -51,17 +51,12 @@ import {
 } from "@folio/shared";
 import { api } from "./api";
 import { PdfPage, usePdf } from "./PdfView";
-import { Admin, Avatar } from "./Admin";
+import { Admin } from "./Admin";
 import { Dashboard } from "./Dashboard";
 import { EditableTitle } from "./EditableTitle";
 import { Login } from "./Login";
-import {
-  confirmLeave,
-  navigate,
-  setUnsaved,
-  useRoute,
-  type Route,
-} from "./route";
+import { confirmLeave, navigate, setUnsaved, useRoute } from "./route";
+import { Avatar, Brand, Sidebar } from "./Sidebar";
 
 const corners: [Position["corner"], string, string][] = [
   ["top-left", "Superior izquierda", "↖"],
@@ -157,7 +152,16 @@ function storeFlag(key: string, value: boolean) {
 const pendingFiles = new Map<string, File[]>();
 const fileName = (title: string) =>
   title.replace(/[\\/:*?"<>|\x00-\x1f]+/g, "-").trim() || "documento";
-function Workspace({ jobId, user }: { jobId: string | null; user: UserView }) {
+function Workspace({
+  jobId,
+  user,
+  onJobsChanged,
+}: {
+  jobId: string | null;
+  user: UserView;
+  /** Actualiza la lista del menú lateral (nombre, estado). */
+  onJobsChanged: () => void;
+}) {
   const [job, setJob] = useState<JobView | null>(null);
   const [config, setConfig] = useState<FolioConfig | null>(null);
   const [source, setSource] = useState<ArrayBuffer | null>(null);
@@ -511,6 +515,7 @@ function Workspace({ jobId, user }: { jobId: string | null; user: UserView }) {
     });
     setJob(updated);
     setDirty(false);
+    onJobsChanged();
     return updated;
   }
   async function generate() {
@@ -533,6 +538,7 @@ function Workspace({ jobId, user }: { jobId: string | null; user: UserView }) {
       setReview(bytes);
       setReviewIndex(0);
       setMode("review");
+      onJobsChanged();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -591,6 +597,7 @@ function Workspace({ jobId, user }: { jobId: string | null; user: UserView }) {
         body: JSON.stringify({ title }),
       });
       setJob((current) => current && { ...current, title: updated.title });
+      onJobsChanged();
     } catch (e) {
       setError((e as Error).message);
     }
@@ -796,7 +803,11 @@ function Workspace({ jobId, user }: { jobId: string | null; user: UserView }) {
       <main>
         <div className="heading">
           <div>
-            <div className="eyebrow">HERRAMIENTAS DE DOCUMENTOS</div>
+            <nav className="eyebrow breadcrumb" aria-label="Ruta">
+              <a href="#/">Mis trabajos</a>
+              <ChevronRight size={12} aria-hidden="true" />
+              <span>{jobId ? (job?.title ?? "Trabajo") : "Nuevo trabajo"}</span>
+            </nav>
             <h1>Foliar documentos</h1>
             <p>Organiza tus páginas. Añade los folios. Deja todo en orden.</p>
           </div>
@@ -1784,57 +1795,17 @@ function Workspace({ jobId, user }: { jobId: string | null; user: UserView }) {
   );
 }
 
-function Topbar({
-  user,
-  route,
-  onLogout,
-}: {
-  user: UserView;
-  route: Route;
-  onLogout: () => void;
-}) {
-  return (
-    <header className="topbar">
-      <a className="brand" href="#/" aria-label="Folio, mis trabajos">
-        <span className="brand-icon">
-          <Layers size={23} />
-        </span>
-        folio<span className="brand-dot">.</span>
-      </a>
-      <span className="topbar-divider" />
-      <span className="tagline">Cada página, en su lugar.</span>
-      <nav className="topnav" aria-label="Secciones">
-        <a
-          href="#/"
-          aria-current={route.view !== "admin" ? "page" : undefined}
-        >
-          Mis trabajos
-        </a>
-        {user.role === "owner" && (
-          <a
-            href="#/admin"
-            aria-current={route.view === "admin" ? "page" : undefined}
-          >
-            Administración
-          </a>
-        )}
-      </nav>
-      <div className="user-chip" title={user.email}>
-        <Avatar user={user} />
-        <span>{user.name}</span>
-      </div>
-      <button className="logout-button" onClick={onLogout}>
-        <LogOut size={16} /> Cerrar sesión
-      </button>
-    </header>
-  );
-}
-
 export default function App() {
   const [session, setSession] = useState<SessionView | null>(null);
   // La sesión caducó con la aplicación abierta: se pide entrar de nuevo sin perder la vista.
   const [expired, setExpired] = useState(false);
   const [error, setError] = useState("");
+  // Trabajos del usuario: los usan el menú lateral y Mis trabajos.
+  const [jobs, setJobs] = useState<JobSummary[] | null>(null);
+  const [jobsError, setJobsError] = useState("");
+  // null = lo predeterminado: menú plegado en el editor y abierto en lo demás.
+  const [collapse, setCollapse] = useState<boolean | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const route = useRoute();
   useEffect(() => {
     api<SessionView>("/auth/session")
@@ -1844,6 +1815,23 @@ export default function App() {
     window.addEventListener("folio:unauthorized", onExpired);
     return () => window.removeEventListener("folio:unauthorized", onExpired);
   }, []);
+  const loadJobs = useCallback(() => {
+    api<JobSummary[]>("/jobs")
+      .then((list) => {
+        setJobs(list);
+        setJobsError("");
+      })
+      .catch((reason) => setJobsError((reason as Error).message));
+  }, []);
+  const userId = session?.user?.id;
+  useEffect(() => {
+    if (userId) loadJobs();
+    else setJobs(null);
+  }, [userId, route, loadJobs]);
+  useEffect(() => {
+    setCollapse(null);
+    setMenuOpen(false);
+  }, [route]);
   const onLogin = useCallback((user: UserView) => {
     setSession((current) => current && { ...current, user });
     setExpired(false);
@@ -1873,20 +1861,40 @@ export default function App() {
     );
   const { user, googleClientId } = session;
   if (!user) return <Login clientId={googleClientId} onLogin={onLogin} />;
+  const collapsed = collapse ?? route.view === "job";
   return (
-    <div className="app">
-      <Topbar user={user} route={route} onLogout={() => void logout()} />
-      {route.view === "admin" && user.role === "owner" ? (
-        <Admin user={user} />
-      ) : route.view === "job" || route.view === "new" ? (
-        <Workspace
-          key={route.view === "job" ? route.id : "nuevo"}
-          jobId={route.view === "job" ? route.id : null}
-          user={user}
-        />
-      ) : (
-        <Dashboard />
-      )}
+    <div className={`shell${collapsed ? " collapsed" : ""}${menuOpen ? " open" : ""}`}>
+      <Sidebar
+        user={user}
+        route={route}
+        jobs={jobs}
+        collapsed={collapsed}
+        onToggle={() => setCollapse(!collapsed)}
+        onClose={() => setMenuOpen(false)}
+        onLogout={() => void logout()}
+      />
+      {menuOpen && <div className="sidebar-backdrop" onClick={() => setMenuOpen(false)} />}
+      <div className="shell-main">
+        <header className="mobile-bar">
+          <button className="icon-only" aria-label="Abrir el menú" onClick={() => setMenuOpen(true)}>
+            <Menu size={20} />
+          </button>
+          <Brand />
+          <Avatar user={user} />
+        </header>
+        {route.view === "admin" && user.role === "owner" ? (
+          <Admin user={user} onJobsChanged={loadJobs} />
+        ) : route.view === "job" || route.view === "new" ? (
+          <Workspace
+            key={route.view === "job" ? route.id : "nuevo"}
+            jobId={route.view === "job" ? route.id : null}
+            user={user}
+            onJobsChanged={loadJobs}
+          />
+        ) : (
+          <Dashboard user={user} jobs={jobs} error={jobsError} onChanged={loadJobs} />
+        )}
+      </div>
       {expired && <Login overlay clientId={googleClientId} onLogin={onLogin} />}
     </div>
   );

@@ -3,21 +3,13 @@ import { LoaderCircle, Trash2, X } from "lucide-react";
 import type { AdminSettings, AdminUser, JobSummary, UserView } from "@folio/shared";
 import { api } from "./api";
 import { formatDate, statusLabels } from "./Dashboard";
+import { Avatar } from "./Sidebar";
 
 const userStatus: Record<AdminUser["status"], string> = {
   active: "Activo",
   pending: "Pendiente",
   blocked: "Bloqueado",
 };
-export function Avatar({ user }: { user: Pick<UserView, "name" | "picture"> }) {
-  return user.picture ? (
-    <img className="avatar" src={user.picture} alt="" referrerPolicy="no-referrer" />
-  ) : (
-    <span className="avatar" aria-hidden="true">
-      {user.name.trim().charAt(0).toUpperCase()}
-    </span>
-  );
-}
 /** Límite propio de un usuario; vacío = límite general. */
 function LimitInput({
   value,
@@ -55,7 +47,14 @@ function LimitInput({
   );
 }
 
-export function Admin({ user }: { user: UserView }) {
+export function Admin({
+  user,
+  onJobsChanged,
+}: {
+  user: UserView;
+  /** Avisa al menú lateral si se borró un trabajo propio. */
+  onJobsChanged: () => void;
+}) {
   const [settings, setSettings] = useState<AdminSettings | null>(null);
   const [form, setForm] = useState({ maxFileMb: "", registration: "open" });
   const [users, setUsers] = useState<AdminUser[] | null>(null);
@@ -155,6 +154,7 @@ export function Admin({ user }: { user: UserView }) {
           list &&
           list.map((item) => (item.id === job.userId ? { ...item, jobs: item.jobs - 1 } : item)),
       );
+      if (job.userId === user.id) onJobsChanged();
     } catch (reason) {
       report(reason);
     }
