@@ -87,7 +87,8 @@ export function Login({
           shape: "pill",
           text: "signin_with",
           locale: "es",
-          width: 280,
+          // Google añade 20 px alrededor y admite de 200 a 400: se ajusta a la tarjeta (móvil).
+          width: Math.min(300, Math.max(200, button.current.clientWidth - 20)),
         });
         setReady(true);
       })
@@ -126,7 +127,7 @@ export function Login({
             {error}
           </div>
         )}
-        <div className="google-button" ref={button} />
+        <div className="google-button" ref={button} hidden={!!error && !ready} />
         {(busy || (!ready && !error)) && (
           <p className="auth-status">
             <LoaderCircle className="spin" size={16} />

@@ -45,9 +45,6 @@ body {
   display: flex;
   justify-content: center;
 }
-.google-button:empty {
-  display: none;
-}
 .auth-status {
   display: flex;
   align-items: center;
@@ -1343,6 +1340,12 @@ footer {
     padding: 0 16px;
     height: 65px;
     gap: 10px;
+  }
+  .auth-screen {
+    padding: 16px;
+  }
+  .auth-card {
+    padding: 24px;
   }
   .brand {
     font-size: 24px;
